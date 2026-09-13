@@ -101,8 +101,15 @@ STORE = get_store()
 
 def participant_salt() -> str:
     auth = SECRETS.get("auth", {})
-    value = str(auth.get("participant_salt", "")).strip()
+    app = SECRETS.get("app", {})
+    value = str(auth.get("participant_salt", app.get("participant_salt", ""))).strip()
     return value or "local-demo-change-this-salt"
+
+
+def smtp_secrets() -> dict[str, Any]:
+    """Support both the new [smtp] and existing Agent [email] syntax."""
+    value = SECRETS.get("smtp") or SECRETS.get("email") or {}
+    return dict(value) if isinstance(value, dict) else value
 
 
 def local_demo_enabled() -> bool:
@@ -151,7 +158,7 @@ def login_page() -> None:
                     if local_demo_enabled():
                         st.info(f"本機測試驗證碼：{code}")
                     else:
-                        send_otp_email(email, code, SECRETS.get("smtp", {}))
+                        send_otp_email(email, code, smtp_secrets())
                     st.session_state.otp_hash = digest
                     st.session_state.otp_expires = expires
                     st.session_state.otp_email = email
