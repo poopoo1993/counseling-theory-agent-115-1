@@ -47,7 +47,7 @@ class AppConfig:
         return cls(
             app_title=str(app.get("title", "諮商理論技巧訓練 Agent")),
             timezone=str(app.get("timezone", "Asia/Taipei")),
-            model_name=str(app.get("model_name", "gemini-2.5-flash")),
+            model_name=str(app.get("model_name", "gemini-3.8-flash")),
             prompt_version=str(app.get("prompt_version", "theory-dialogue-v1.0")),
             rubric_version=str(app.get("rubric_version", "theory-rubric-v1.0")),
             allowed_domains=allowed_domains,
