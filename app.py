@@ -83,10 +83,13 @@ def get_store():
     try:
         store = build_shared_store(json.dumps(SECRETS, sort_keys=True), CONFIG.timezone)
         st.session_state.store_mode = "google_sheets"
-    except Exception as exc:
+    except Exception:
         store = MemoryStore(CONFIG.timezone)
         st.session_state.store_mode = "memory"
-        st.session_state.store_error = str(exc)
+        # Never expose credential fragments returned by google-auth/cryptography.
+        st.session_state.store_error = (
+            "Google Sheets 驗證失敗。請檢查服務帳戶欄位、private_key 格式與試算表共用權限。"
+        )
     st.session_state.data_store = store
     return store
 
