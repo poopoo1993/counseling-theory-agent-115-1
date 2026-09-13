@@ -26,14 +26,21 @@ class GeminiService:
         temperature: float = 0.4,
         max_output_tokens: int = 1200,
         response_json: bool = False,
+        thinking_level: str = "low",
         attempts: int = 3,
     ) -> str:
-        config = types.GenerateContentConfig(
+        config_values: dict[str, Any] = dict(
             system_instruction=system_instruction,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             response_mime_type="application/json" if response_json else "text/plain",
         )
+        # Gemini 3 uses dynamic thinking and defaults to high.  Explicit low
+        # thinking prevents short responses from spending the whole output
+        # allowance before producing visible text.
+        if self.model_name.startswith("gemini-3"):
+            config_values["thinking_config"] = {"thinking_level": thinking_level}
+        config = types.GenerateContentConfig(**config_values)
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -60,7 +67,8 @@ class GeminiService:
             "只回覆 OK。",
             system_instruction="這是 API 連線測試。",
             temperature=0.0,
-            max_output_tokens=10,
+            max_output_tokens=256,
+            thinking_level="low",
             attempts=1,
         )
         if "OK" not in result.upper():
