@@ -11,6 +11,14 @@ def _section(source: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _string_tuple(value: Any, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return (value.strip().lower(),) if value.strip() else default
+    return tuple(str(item).strip().lower() for item in value if str(item).strip())
+
+
 @dataclass(frozen=True)
 class AppConfig:
     app_title: str
@@ -29,15 +37,22 @@ class AppConfig:
     def from_secrets(cls, secrets: Mapping[str, Any]) -> "AppConfig":
         app = _section(secrets, "app")
         auth = _section(secrets, "auth")
+        legacy_test_emails = _string_tuple(app.get("teacher_test_emails"))
+        allowed_domains = _string_tuple(
+            auth.get("allowed_domains", app.get("allowed_domains", app.get("allowed_domain"))),
+            ("hcu.edu.tw",),
+        )
+        login_allowlist = _string_tuple(auth.get("login_allowlist"), legacy_test_emails)
+        teacher_emails = _string_tuple(auth.get("teacher_emails"), legacy_test_emails)
         return cls(
             app_title=str(app.get("title", "諮商理論技巧訓練 Agent")),
             timezone=str(app.get("timezone", "Asia/Taipei")),
             model_name=str(app.get("model_name", "gemini-2.5-flash")),
             prompt_version=str(app.get("prompt_version", "theory-dialogue-v1.0")),
             rubric_version=str(app.get("rubric_version", "theory-rubric-v1.0")),
-            allowed_domains=tuple(str(x).lower() for x in auth.get("allowed_domains", ["hcu.edu.tw"])),
-            login_allowlist=tuple(str(x).lower() for x in auth.get("login_allowlist", [])),
-            teacher_emails=tuple(str(x).lower() for x in auth.get("teacher_emails", [])),
+            allowed_domains=allowed_domains,
+            login_allowlist=login_allowlist,
+            teacher_emails=teacher_emails,
             otp_ttl_seconds=int(auth.get("otp_ttl_seconds", 600)),
             max_input_chars=int(app.get("max_input_chars", 800)),
             recent_context_turns=int(app.get("recent_context_turns", 14)),

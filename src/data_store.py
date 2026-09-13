@@ -5,6 +5,8 @@ API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫。
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import uuid
@@ -57,6 +59,22 @@ SCHEMAS: dict[str, list[str]] = {
 }
 
 
+class ServiceAccountFieldsMissingError(ValueError):
+    """Required service-account fields are absent."""
+
+
+class PrivateKeyIncompleteError(ValueError):
+    """The PEM body is empty or shorter than its DER length header declares."""
+
+
+class PrivateKeyEncodingError(ValueError):
+    """The PEM body contains characters that are not valid Base64."""
+
+
+class PrivateKeyParseError(ValueError):
+    """The decoded value is not a usable PKCS#8 private key."""
+
+
 def json_cell(value: Any) -> str:
     if value is None:
         return ""
@@ -95,12 +113,52 @@ def normalize_private_key(value: Any) -> str:
     )
 
 
+def validate_private_key_structure(pem: str) -> None:
+    """Validate PEM/Base64/DER structure without logging any credential text."""
+    begin = "-----BEGIN PRIVATE KEY-----"
+    end = "-----END PRIVATE KEY-----"
+    if begin not in pem or end not in pem:
+        raise PrivateKeyIncompleteError
+
+    body = pem.split(begin, 1)[1].split(end, 1)[0]
+    compact = "".join(body.split())
+    if not compact:
+        raise PrivateKeyIncompleteError
+
+    try:
+        der = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        raise PrivateKeyEncodingError from None
+
+    # DER begins with a SEQUENCE whose encoded length describes the whole key.
+    if len(der) < 4 or der[0] != 0x30:
+        raise PrivateKeyParseError
+    first_length = der[1]
+    if first_length & 0x80:
+        length_octets = first_length & 0x7F
+        if length_octets == 0 or len(der) < 2 + length_octets:
+            raise PrivateKeyIncompleteError
+        payload_length = int.from_bytes(der[2:2 + length_octets], "big")
+        expected_length = 2 + length_octets + payload_length
+    else:
+        expected_length = 2 + first_length
+    if expected_length != len(der):
+        raise PrivateKeyIncompleteError
+
+
 class GoogleSheetsStore:
     def __init__(self, spreadsheet_id: str, service_account: Mapping[str, Any], timezone: str):
         credentials = dict(service_account)
+        required = {"client_email", "token_uri", "private_key"}
+        if any(not str(credentials.get(field, "")).strip() for field in required):
+            raise ServiceAccountFieldsMissingError
         if "private_key" in credentials:
             credentials["private_key"] = normalize_private_key(credentials["private_key"])
-        client = gspread.service_account_from_dict(credentials)
+            validate_private_key_structure(credentials["private_key"])
+        try:
+            client = gspread.service_account_from_dict(credentials)
+        except ValueError:
+            raise PrivateKeyParseError from None
         self.book = client.open_by_key(spreadsheet_id)
         self.timezone = timezone
         self.worksheets: dict[str, gspread.Worksheet] = {}
@@ -108,11 +166,44 @@ class GoogleSheetsStore:
 
     @classmethod
     def from_secrets(cls, secrets: Mapping[str, Any], timezone: str) -> "GoogleSheetsStore":
+        # Preferred compatibility path: same syntax as the existing group /
+        # helping-skills Agents.
+        spreadsheet_id = str(secrets.get("SPREADSHEET_ID", "")).strip()
+        service_json = secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        service_account: Mapping[str, Any] | dict[str, Any] = {}
+        if service_json:
+            if isinstance(service_json, Mapping):
+                service_account = dict(service_json)
+            else:
+                try:
+                    parsed = json.loads(str(service_json))
+                except json.JSONDecodeError:
+                    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是完整 JSON。") from None
+                if not isinstance(parsed, dict):
+                    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是 JSON 物件。")
+                service_account = parsed
+
+        # Current nested syntax remains supported for existing deployments.
         block = secrets.get("google_sheets", {})
-        spreadsheet_id = str(block.get("spreadsheet_id", "")).strip()
-        service_account = block.get("service_account", {})
+        if not isinstance(block, Mapping):
+            block = {}
+        if not spreadsheet_id:
+            spreadsheet_id = str(block.get("spreadsheet_id", "")).strip()
+        if not service_account:
+            nested_service = block.get("service_account", {})
+            if isinstance(nested_service, Mapping):
+                service_account = nested_service
+
+        # Older deployments used a top-level [gcp_service_account] section.
+        if not service_account:
+            legacy_service = secrets.get("gcp_service_account", {})
+            if isinstance(legacy_service, Mapping):
+                service_account = legacy_service
         if not spreadsheet_id or not service_account:
-            raise RuntimeError("尚未設定 Google Sheets spreadsheet_id 或 service_account。")
+            raise RuntimeError(
+                "尚未設定 SPREADSHEET_ID／GOOGLE_SERVICE_ACCOUNT_JSON，"
+                "或 google_sheets／gcp_service_account 相容欄位。"
+            )
         return cls(spreadsheet_id, service_account, timezone)
 
     def now(self) -> str:
