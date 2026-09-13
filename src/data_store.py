@@ -76,11 +76,30 @@ def parse_json_cell(value: Any, default: Any) -> Any:
         return default
 
 
+def normalize_private_key(value: Any) -> str:
+    """Accept either a complete PEM key or the body-only legacy format."""
+    key = str(value or "").strip().replace("\\n", "\n")
+    if not key:
+        return key
+
+    if "-----BEGIN PRIVATE KEY-----" in key and "-----END PRIVATE KEY-----" in key:
+        return key
+
+    # The earlier group Agent stored only the Base64 body. Reconstruct the
+    # standard PKCS#8 PEM wrapper required by google-auth/cryptography.
+    body = "".join(key.split())
+    return (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{body}\n"
+        "-----END PRIVATE KEY-----\n"
+    )
+
+
 class GoogleSheetsStore:
     def __init__(self, spreadsheet_id: str, service_account: Mapping[str, Any], timezone: str):
         credentials = dict(service_account)
         if "private_key" in credentials:
-            credentials["private_key"] = str(credentials["private_key"]).replace("\\n", "\n")
+            credentials["private_key"] = normalize_private_key(credentials["private_key"])
         client = gspread.service_account_from_dict(credentials)
         self.book = client.open_by_key(spreadsheet_id)
         self.timezone = timezone
