@@ -4,7 +4,7 @@
 
 ## 本版範圍
 
-本專案依《三套 AI Agent 工程開發規格書 v1.0》中「Agent 3 諮商理論技巧訓練 Agent」建置，並納入後續確認的四項需求：括弧非語言訊息、`ryanhsiao89@gmail.com` 教師測試白名單、雙向跨次續談，以及學生選配逐字稿下載。另實作學生自備 Gemini API Key、Google Sheets 完整紀錄與可辨識學生 Email 的教師後台。
+本專案依《三套 AI Agent 工程開發規格書 v1.0》中「Agent 3 諮商理論技巧訓練 Agent」建置，並納入後續確認的四項需求：括弧非語言訊息、教師測試白名單、雙向跨次續談，以及學生選配逐字稿下載。另實作學生自備 Gemini API Key、Google Sheets 完整紀錄與可辨識學生 Email 的教師後台。
 
 ## 已完成檢查
 

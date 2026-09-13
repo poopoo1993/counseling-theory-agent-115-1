@@ -35,30 +35,29 @@
 
 ## 四 填入 Streamlit Secrets
 
-把 JSON 的欄位逐一貼入 `[google_sheets.service_account]`，並把試算表 ID 填入：
+將完整服務帳戶 JSON 原封不動放入 `GOOGLE_SERVICE_ACCOUNT_JSON`，並將試算表 ID 放在 Secrets 最上方：
 
 ```toml
-[google_sheets]
-spreadsheet_id = "你的Spreadsheet ID"
-
-[google_sheets.service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = """-----BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-"""
-client_email = "...iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-universe_domain = "googleapis.com"
+SPREADSHEET_ID = "你的Spreadsheet ID"
+REQUIRE_SHEETS = true
+GOOGLE_SERVICE_ACCOUNT_JSON = '''
+{
+  "type": "service_account",
+  "project_id": "原始JSON內容",
+  "private_key_id": "原始JSON內容",
+  "private_key": "-----BEGIN PRIVATE KEY-----\\n原始完整內容\\n-----END PRIVATE KEY-----\\n",
+  "client_email": "原始JSON內容",
+  "client_id": "原始JSON內容",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "原始JSON內容",
+  "universe_domain": "googleapis.com"
+}
+'''
 ```
 
-不要把整份 JSON 用單引號包成一行，也不要在 Streamlit Secrets 中保留範例中文字。
+三個設定必須放在任何 `[app]`、`[email]` 等 section 之前。JSON 內容不可保留範例文字，也不可提交至 GitHub。
 
 ## 五 權限與研究資料建議
 

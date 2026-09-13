@@ -21,7 +21,7 @@ Streamlit 官方明確建議 Secrets 不要放在 Git repository，而應在部�
 2. 右上角按 `＋`，選 `New repository`。
 3. Repository name 建議填：`counseling-theory-agent-115-1`。
 4. Description 可填：`115-1 諮商理論技巧訓練 Agent`。
-5. 測試期可選 `Private`；若日後希望公開程式碼，再另外修改 visibility。
+5. 測試期可選 `Private`；完成安全檢查後再修改為 `Public`。
 6. 不要勾選自動新增 README、`.gitignore` 或 License，因為壓縮檔內已經有 README 與 `.gitignore`。
 7. 按 `Create repository`。
 
@@ -33,8 +33,8 @@ GitHub 官方指出，匯入既有專案時不要先建立 README 等檔案，�
 2. 打開解壓後的 `theory-agent-v1` 資料夾。
 3. 回到新建的 GitHub repository 頁面。
 4. 按 `uploading an existing file`；若已進入一般檔案頁，按 `Add file` → `Upload files`。
-5. 將 `theory-agent-v1` 資料夾內的所有檔案與子資料夾一起拖入上傳區。
-6. 確認 GitHub 最上層直接看得到 `app.py`、`requirements.txt`、`src`、`docs`、`.streamlit`；不要多包一層資料夾。
+5. 將 `theory-agent-v1` 資料夾內的非隱藏檔案與子資料夾拖入上傳區。
+6. 確認 GitHub 最上層直接看得到 `app.py`、`requirements.txt`、`src`、`docs`；不要多包一層資料夾。`.streamlit` 與 `.github` 是隱藏資料夾，使用 GitHub 網頁上傳時可略過；正式 Secrets 由 Streamlit 後台管理。
 7. Commit message 填：`Initial Theory Agent v1`。
 8. 按 `Commit changes`。
 
@@ -56,19 +56,34 @@ Streamlit 官方目前的流程是從 workspace 按 `Create app`，填入 reposi
 
 ## 五 貼入 Secrets
 
-1. 在本機開啟 `.streamlit/secrets.toml.example`。
-2. 複製內容到一個不會上傳 GitHub 的暫存文字檔。
-3. 逐項替換：
-   - `participant_salt`：至少 32 字元的隨機字串。
-   - `sender_email`：寄送 OTP 的 Gmail。
-   - `app_password`：該 Gmail 的應用程式密碼，不是一般登入密碼。
-   - `spreadsheet_id`：Google 試算表網址中 `/d/` 與 `/edit` 之間的字串。
-   - `[google_sheets.service_account]`：服務帳戶 JSON 中對應欄位。
-4. `login_allowlist` 與 `teacher_emails` 保留 `ryanhsiao89@gmail.com`。
-5. 將填好的完整 TOML 貼到 Streamlit `Advanced settings` → `Secrets`。
-6. 按 `Save`，再按 `Deploy`。
+1. 從既有 Agent 複製完整 `GOOGLE_SERVICE_ACCOUNT_JSON`，或從服務帳戶 JSON 金鑰檔複製全部 JSON。
+2. 在 Secrets 最上方、任何 `[section]` 之前設定 `SPREADSHEET_ID`、`REQUIRE_SHEETS` 與 `GOOGLE_SERVICE_ACCOUNT_JSON`。
+3. `GOOGLE_SERVICE_ACCOUNT_JSON` 使用 TOML 多行字串 `''' ... '''` 包住完整 JSON；JSON 內的 `\\n` 必須保留，不可手動拆解 private key。
+4. 在 `[app]` 填入教師測試 Email、不可公開的 `participant_salt` 與模型名稱。
+5. 在 `[email]` 填入寄件 Gmail 與 Gmail 應用程式密碼。
+6. 將完整 TOML 貼到 Streamlit `Advanced settings` → `Secrets`，按 `Save`，再按 `Deploy`。
 
-私鑰必須保留 BEGIN／END 行與完整內容；不要刪除三引號。部署後如需修改，可由 App settings 更新 Secrets。[Streamlit Secrets 官方說明](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)
+範例骨架：
+
+```toml
+SPREADSHEET_ID = "你的Spreadsheet ID"
+REQUIRE_SHEETS = true
+GOOGLE_SERVICE_ACCOUNT_JSON = '''
+{請貼入完整且有效的服務帳戶 JSON}
+'''
+
+[app]
+model_name = "gemini-3.8-flash"
+allowed_domain = "hcu.edu.tw"
+teacher_test_emails = ["教師測試Email"]
+participant_salt = "至少32字元且不可公開的隨機字串"
+
+[email]
+sender_email = "OTP寄件Gmail"
+app_password = "Gmail應用程式密碼"
+```
+
+部署後如需修改，請由 App settings 更新 Secrets，不可提交至 GitHub。[Streamlit Secrets 官方說明](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)
 
 ## 六 第一次啟動檢查
 
@@ -93,7 +108,7 @@ Streamlit 官方目前的流程是從 workspace 按 `Create app`，填入 reposi
 
 ## 七 正式驗收順序
 
-1. 用 `ryanhsiao89@gmail.com` 收 OTP 並登入。
+1. 用 Secrets 白名單中的教師測試 Email 收 OTP 並登入。
 2. 切到學生模擬端，貼入你自己的 Gemini API Key 並測試。
 3. 跑一次「學派體驗」，確認結束後無學生分數、只有 AI 技巧解析。
 4. 跑一次「學派實作」，選恰好 3 技巧，確認形成性分數、具體優點、替代句及逐字稿下載。

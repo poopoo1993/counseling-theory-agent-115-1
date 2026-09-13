@@ -4,7 +4,7 @@
 
 - [ ] `@hcu.edu.tw` 可收到 OTP 並登入。
 - [ ] 非允許網域無法登入。
-- [ ] `ryanhsiao89@gmail.com` 可登入並看到教師後台。
+- [ ] Secrets 白名單中的教師測試 Email 可登入並看到教師後台。
 - [ ] 學生無法看到教師後台。
 - [ ] API Key 留白或無效時不能開始模擬。
 - [ ] Google Sheets、逐字稿及後台中查不到學生 API Key。
