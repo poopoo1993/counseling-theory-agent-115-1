@@ -42,7 +42,7 @@ from src.prompts import (
     uses_planner_llm,
 )
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
-from src.session_service import finish_session, new_session, new_turn
+from src.session_service import finish_session, new_anonymous_participant_id, new_session, new_turn
 from src.theory_library import PRACTICE_THEMES, SCHOOLS, get_school, get_techniques, validate_selected_techniques
 from src.transcript import make_transcript_txt, safe_filename
 from src.ui import (
@@ -201,12 +201,28 @@ def persist_thread_state(status: str = "in_progress", *, include_turns: bool = T
     session = st.session_state.active_session
     if not session:
         return
+    last_session_id = session["session_id"]
     if include_turns:
         recent = (st.session_state.prior_turns_context + st.session_state.turns)[-6:]
         analysis = st.session_state.chat_analysis or {}
+        case_data = st.session_state.case_data or {}
+        plan = st.session_state.counseling_plan or {}
     else:
         recent = list(st.session_state.prior_turns_context or [])[-6:]
         analysis = {}
+        case_data = {}
+        plan = {}
+        last_session_id = ""
+        existing = next(
+            (
+                thread for thread in STORE.list_threads(session["participant_id"])
+                if str(thread.get("conversation_thread_id")) == str(session["conversation_thread_id"])
+            ),
+            None,
+        )
+        previous = str((existing or {}).get("last_session_id") or "")
+        if previous and previous != str(session["session_id"]):
+            last_session_id = previous
     STORE.save_thread({
         "conversation_thread_id": session["conversation_thread_id"],
         "participant_id": session["participant_id"],
@@ -217,11 +233,11 @@ def persist_thread_state(status: str = "in_progress", *, include_turns: bool = T
         "selected_techniques": session["selected_techniques"],
         "selected_technique_names": session["selected_technique_names"],
         "case_id": session.get("case_id", ""),
-        "case_data": st.session_state.case_data or {},
-        "counseling_plan": st.session_state.counseling_plan or {},
+        "case_data": case_data,
+        "counseling_plan": plan,
         "chat_analysis": analysis,
         "latest_snapshot": st.session_state.continuation_snapshot or {},
-        "last_session_id": session["session_id"],
+        "last_session_id": last_session_id,
         "recent_turns": recent,
         "difficulty": session.get("difficulty", ""),
         "updated_at": STORE.now(),
@@ -990,30 +1006,68 @@ def request_experience_research_consent() -> None:
 
 @st.dialog("是否作為研究素材", dismissible=False)
 def _open_experience_research_consent() -> None:
-    st.markdown("這次你擔任個案。是否願意將此次晤談**逐字稿**作為教學研究素材？")
-    st.caption("選「不願意」後，系統會刪除本次對話逐字稿，研究匯出也不會包含這些內容。本頁仍可查看示範解析，但不會保存原句。")
+    st.markdown("這次你擔任個案。是否願意將此次晤談作為教學研究素材？")
+    st.caption("不願意：只留完成紀錄，不保存晤談過程、示範解析或諮商師原句。")
     keep_col, drop_col = st.columns(2, gap="small")
     with keep_col:
-        if st.button("願意", type="primary", use_container_width=True):
-            finalize_session(keep_transcript=True)
+        willing = st.button("願意", type="primary", use_container_width=True)
+        anonymous = st.checkbox(
+            "以不記名方式保存（只留晤談過程與時間，不連結我的帳號）",
+            key="experience_research_anonymous",
+        )
+        if anonymous:
+            st.caption("你的帳號會依「不願意」留存；晤談過程另以不記名與時間紀錄保存。")
+        if willing:
+            finalize_session(consent="anonymous" if anonymous else "yes")
             st.rerun()
     with drop_col:
         if st.button("不願意", use_container_width=True):
-            finalize_session(keep_transcript=False)
+            finalize_session(consent="no")
             st.rerun()
 
 
-def finalize_session(*, keep_transcript: bool = True) -> None:
+def finalize_session(*, keep_transcript: bool = True, consent: str | None = None) -> None:
     session = finish_session(st.session_state.active_session, CONFIG.timezone, "completed")
     if session["mode"] == "experience":
-        session["research_consent"] = "yes" if keep_transcript else "no"
+        chosen = consent if consent in {"yes", "no", "anonymous"} else ("yes" if keep_transcript else "no")
+        session["research_consent"] = chosen
     else:
+        chosen = "yes"
         session["research_consent"] = ""
-        keep_transcript = True
     st.session_state.active_session = session
     STORE.finish_session(session)
-    if not keep_transcript:
-        STORE.purge_session_transcript(session["session_id"])
+
+    if chosen != "yes":
+        persist_thread_state("active", include_turns=False)
+        st.session_state.assessment = {}
+        st.session_state.raw_assessment = ""
+        st.session_state.continuation_snapshot = {
+            "continuation_role": session["continuation_role"],
+            "relationship_summary": "本次未保存可識別的晤談過程，續談時請重新建立關係與焦點。",
+            "disclosed_topics": [],
+            "unfinished_issues": [],
+            "next_session_focus": [],
+        }
+        persist_thread_state("active", include_turns=False)
+        if chosen == "no":
+            STORE.purge_session_transcript(session["session_id"])
+        else:
+            original_pid = session["participant_id"]
+            original_thread = str(session.get("conversation_thread_id") or "")
+            STORE.reassign_session_participant(session["session_id"], new_anonymous_participant_id())
+            stub = dict(session)
+            stub["session_id"] = str(uuid.uuid4())
+            stub["participant_id"] = original_pid
+            stub["conversation_thread_id"] = original_thread
+            stub["research_consent"] = "no"
+            STORE.start_session(stub)
+        st.session_state.turns = []
+        st.session_state.turn_reviews = []
+        st.session_state.coach_thoughts = []
+        st.session_state.chat_analysis = None
+        st.session_state.counseling_plan = None
+        return
+
     raw = ""
     parsed: dict[str, Any]
     try:
@@ -1038,11 +1092,7 @@ def finalize_session(*, keep_transcript: bool = True) -> None:
             "total_score": None,
             "strengths": [],
             "improvement_points": [],
-            "encouragement": (
-                "本次晤談已結束；評量服務暫時無法完成。"
-                if not keep_transcript
-                else "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。"
-            ),
+            "encouragement": "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。",
             "limitations": str(exc),
         }
 
@@ -1066,60 +1116,54 @@ def finalize_session(*, keep_transcript: bool = True) -> None:
         "parsed_json": parsed,
         "created_at": STORE.now(),
     }
-    if keep_transcript:
-        STORE.save_assessment(record)
+    STORE.save_assessment(record)
     st.session_state.assessment = parsed
-    st.session_state.raw_assessment = raw if keep_transcript else ""
+    st.session_state.raw_assessment = raw
 
-    if keep_transcript:
-        try:
-            snapshot_raw = gemini().generate_text(
-                build_snapshot_prompt(
-                    session["mode"], session["school_id"], session["selected_techniques"],
-                    st.session_state.turns, st.session_state.continuation_snapshot,
-                ),
-                system_instruction="你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
-                temperature=0.1,
-                max_output_tokens=1600,
-                response_json=True,
-            )
-            snapshot = parse_json_response(snapshot_raw)
-        except Exception:
-            snapshot = {
-                "continuation_role": session["continuation_role"],
-                "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
-                "disclosed_topics": [],
-                "unfinished_issues": [],
-                "next_session_focus": [],
-            }
-    else:
+    try:
+        snapshot_raw = gemini().generate_text(
+            build_snapshot_prompt(
+                session["mode"], session["school_id"], session["selected_techniques"],
+                st.session_state.turns, st.session_state.continuation_snapshot,
+            ),
+            system_instruction="你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
+            temperature=0.1,
+            max_output_tokens=1600,
+            response_json=True,
+        )
+        snapshot = parse_json_response(snapshot_raw)
+    except Exception:
         snapshot = {
             "continuation_role": session["continuation_role"],
-            "relationship_summary": "學生未同意保存逐字稿，續談時請重新建立關係與焦點。",
+            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
             "disclosed_topics": [],
             "unfinished_issues": [],
             "next_session_focus": [],
         }
     st.session_state.continuation_snapshot = snapshot
-    persist_thread_state("active", include_turns=keep_transcript)
+    persist_thread_state("active", include_turns=True)
 
 
 def render_feedback(settings: dict[str, str]) -> None:
     session = st.session_state.active_session
     assessment = st.session_state.assessment or {}
+    consent = str(session.get("research_consent") or "")
+    hide_process = session["mode"] == "experience" and consent in {"no", "anonymous"}
     with st.container(border=True):
         kicker = "體驗完成" if session["mode"] == "experience" else "晤談完成"
         st.markdown(f'<p class="ct-kicker">{kicker}</p>', unsafe_allow_html=True)
         st.markdown(f"**{session['school_name']} · {mode_label(session['mode'])}**")
         render_chips(session["selected_technique_names"])
         if session["mode"] == "experience":
-            if str(session.get("research_consent") or "") == "no":
-                st.caption("依你的選擇，本次逐字稿已刪除，不會作為研究素材。示範解析僅供本頁查看。")
+            if consent == "no":
+                st.caption("依你的選擇，本次只留下完成紀錄，未保存晤談過程、示範解析或諮商師原句。")
+            elif consent == "anonymous":
+                st.caption("已以不記名方式保存晤談過程與時間。你的帳號只留下與「不願意」相同的完成紀錄，不含諮商過程。")
             else:
                 st.caption("你剛才擔任個案。逐字稿與示範解析已保存，之後可續談同一位 AI 諮商師。")
         else:
             st.caption("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。之後可續談同一位 AI 對話角色。")
-    if as_bool(settings.get("student_feedback_visible"), True):
+    if not hide_process and as_bool(settings.get("student_feedback_visible"), True):
         if session["mode"] == "practice":
             if as_bool(settings.get("student_score_visible"), True) and assessment.get("total_score") is not None:
                 score_col, note_col = st.columns([1, 2.2], gap="medium", vertical_alignment="center")
@@ -1166,7 +1210,7 @@ def render_feedback(settings: dict[str, str]) -> None:
                 for item in assessment["technique_explanations"]:
                     name = next((t["name"] for t in get_school(session["school_id"])["techniques"] if t["id"] == item.get("technique_id")), item.get("technique_id", "技巧"))
                     with st.expander(name):
-                        if item.get("ai_quote") and str(session.get("research_consent") or "") != "no":
+                        if item.get("ai_quote"):
                             st.caption("AI 諮商師原句")
                             render_quote(item.get("ai_quote", ""))
                         st.write(f"使用理由：{item.get('why_used', '')}")
@@ -1179,10 +1223,10 @@ def render_feedback(settings: dict[str, str]) -> None:
             if assessment.get("encouragement"):
                 st.markdown("**給觀察者的一句話**")
                 render_quote(assessment["encouragement"])
-    else:
+    elif not hide_process:
         st.info("教師目前設定為不向學生顯示 AI 回饋；本次資料仍已保存供教師檢視。")
 
-    kept = str(session.get("research_consent") or "") != "no"
+    kept = not hide_process
     action_col, home_col = st.columns(2, gap="small")
     with action_col:
         if kept:
@@ -1395,35 +1439,41 @@ def teacher_dashboard() -> None:
             sdf = pd.DataFrame(sessions)
             idf = pd.DataFrame(identities)[["participant_id", "email"]] if identities else pd.DataFrame(columns=["participant_id", "email"])
             merged = sdf.merge(idf, on="participant_id", how="left")
+            identified = merged[~merged["participant_id"].astype(str).str.startswith("P-ANON-")]
             completed = merged[merged["completion_status"].isin(["completed", "safety_stopped"])]
             c1, c2, c3 = st.columns(3, gap="medium")
-            c1.metric("學生人數", int(merged["participant_id"].nunique()))
+            c1.metric("學生人數", int(identified["participant_id"].nunique()) if not identified.empty else 0)
             c2.metric("Session 數", len(merged))
             durations = pd.to_numeric(merged.get("duration_seconds", pd.Series(dtype=float)), errors="coerce").fillna(0)
             c3.metric("累計練習分鐘", f"{durations.sum()/60:.1f}")
-            email_options = ["全部"] + sorted(str(x) for x in merged["email"].dropna().unique())
+            email_options = ["全部"] + sorted(str(x) for x in identified["email"].dropna().unique())
             selected_email = st.selectbox("依學校 Email 篩選", email_options)
             shown = completed if selected_email == "全部" else completed[completed["email"] == selected_email]
             columns = [c for c in ["email", "started_at", "mode", "school_id", "selected_technique_names", "duration_seconds", "completion_status", "research_consent", "session_id"] if c in shown.columns]
             display = shown[columns].copy()
+            consent_values = shown["research_consent"].astype(str) if "research_consent" in shown.columns else pd.Series([""] * len(shown), index=shown.index)
             if "research_consent" in display.columns:
-                display["research_consent"] = display["research_consent"].map(
-                    lambda x: {"yes": "同意", "no": "未同意"}.get(str(x), "—")
+                display["research_consent"] = consent_values.map(
+                    lambda x: {"yes": "同意", "no": "未同意", "anonymous": "匿名"}.get(str(x), "—")
                 )
+            if "email" in display.columns:
+                display.loc[consent_values.eq("anonymous"), "email"] = ""
             st.dataframe(display, use_container_width=True, hide_index=True)
             if not shown.empty:
                 session_ids = list(shown["session_id"].astype(str))
                 chosen = st.selectbox("查看單次 Session", session_ids, format_func=lambda x: f"{x[:8]}…")
                 row = shown[shown["session_id"].astype(str) == chosen].iloc[0].to_dict()
+                consent = str(row.get("research_consent") or "")
+                student_label = "不記名" if consent == "anonymous" else str(row.get("email", "") or "")
                 render_meta_grid([
-                    ("學生", str(row.get("email", ""))),
+                    ("學生", student_label),
                     ("學派", _school_display_name(str(row.get("school_id", "")))),
                     ("模式", mode_label(str(row.get("mode", "")))),
                 ])
                 turns = STORE.session_turns(chosen)
                 st.markdown("**逐字稿**")
-                if str(row.get("research_consent") or "") == "no":
-                    render_empty_state("學生未同意作為研究素材", "本次體驗的對話逐字稿已刪除，不會出現在研究匯出中。")
+                if consent == "no":
+                    render_empty_state("學生未同意作為研究素材", "本次體驗只留下完成紀錄，不含諮商過程，也不會出現在研究匯出的對話資料中。")
                 else:
                     render_transcript(turns)
                 thread_id = str(row.get("conversation_thread_id", ""))
@@ -1431,7 +1481,7 @@ def teacher_dashboard() -> None:
                     (t for t in STORE.all_records("Threads") if str(t.get("conversation_thread_id")) == thread_id),
                     None,
                 )
-                if thread:
+                if thread and consent not in {"no", "anonymous"}:
                     with st.expander("內部諮商計畫（學生不可見）"):
                         st.json(parse_json_cell(thread.get("counseling_plan"), {}), expanded=False)
                     with st.expander("內部對話分析（學生不可見）"):
@@ -1466,6 +1516,7 @@ def teacher_dashboard() -> None:
             st.caption(
                 "匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。"
                 "whitelist 與 IdentityMap 含 Email，研究去識別化時應單獨保管或移除。"
+                "體驗模式選「不願意」的對話資料不會匯出；選不記名的晤談過程會以 P-ANON 匯出。"
             )
             try:
                 payload = export_research_zip()

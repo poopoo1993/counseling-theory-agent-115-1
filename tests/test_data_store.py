@@ -111,6 +111,100 @@ def test_sessions_schema_includes_research_consent():
     assert "research_consent" in SCHEMAS["Sessions"]
 
 
+def test_anonymous_participant_id_is_random_and_prefixed():
+    from src.session_service import new_anonymous_participant_id
+
+    first = new_anonymous_participant_id()
+    second = new_anonymous_participant_id()
+    assert first.startswith("P-ANON-")
+    assert second.startswith("P-ANON-")
+    assert first != second
+    assert len(first) == len("P-ANON-") + 12
+    assert all(ch in "0123456789ABCDEF" for ch in first.removeprefix("P-ANON-"))
+
+
+def test_reassign_session_participant_unlinks_identity_and_keeps_process(tmp_path):
+    from src.session_service import new_anonymous_participant_id
+
+    store = SqliteStore(str(tmp_path / "anon.sqlite"), "Asia/Taipei")
+    student = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
+    store.start_session({
+        "session_id": "S-anon",
+        "conversation_thread_id": "T-keep",
+        "participant_id": student,
+        "case_id": "case-1",
+        "research_consent": "anonymous",
+        "completion_status": "completed",
+        "started_at": "2026-09-15T21:00:00+08:00",
+        "ended_at": "2026-09-15T21:08:00+08:00",
+        "duration_seconds": "480",
+    })
+    store.append_turn({
+        "turn_id": "t1",
+        "session_id": "S-anon",
+        "conversation_thread_id": "T-keep",
+        "participant_id": student,
+        "turn_index": 1,
+        "content_raw": "晤談內容",
+        "timestamp": "2026-09-15T21:01:00+08:00",
+    })
+    store.save_thread({
+        "conversation_thread_id": "T-keep",
+        "participant_id": student,
+        "status": "active",
+        "updated_at": store.now(),
+        "last_session_id": "previous",
+        "recent_turns": [{"content_raw": "不應被此次改掛"}],
+    })
+    anon = new_anonymous_participant_id()
+    store.reassign_session_participant("S-anon", anon)
+    session = next(row for row in store.all_records("Sessions") if row["session_id"] == "S-anon")
+    turn = store.session_turns("S-anon")[0]
+    assert session["participant_id"] == anon
+    assert session["conversation_thread_id"] == ""
+    assert session["case_id"] == ""
+    assert turn["participant_id"] == anon
+    assert turn["conversation_thread_id"] == ""
+    assert turn["content_raw"] == "晤談內容"
+    assert turn["timestamp"] == "2026-09-15T21:01:00+08:00"
+    assert store.count_sessions(student) == 0
+    assert all(row["participant_id"] != anon for row in store.all_records("IdentityMap"))
+    thread = store.list_threads(student)[0]
+    assert thread["conversation_thread_id"] == "T-keep"
+    assert thread["participant_id"] == student
+
+
+def test_memory_store_reassign_session_participant_unlinks_thread():
+    from src.session_service import new_anonymous_participant_id
+
+    store = MemoryStore("Asia/Taipei")
+    student = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
+    store.start_session({
+        "session_id": "S-mem",
+        "conversation_thread_id": "T-mem",
+        "participant_id": student,
+        "case_id": "case-mem",
+        "research_consent": "anonymous",
+    })
+    store.append_turn({
+        "turn_id": "tm1",
+        "session_id": "S-mem",
+        "conversation_thread_id": "T-mem",
+        "participant_id": student,
+        "turn_index": 1,
+        "content_raw": "匿名應保留",
+        "timestamp": "2026-09-15T21:02:00+08:00",
+    })
+    anon = new_anonymous_participant_id()
+    store.reassign_session_participant("S-mem", anon)
+    session = store.all_records("Sessions")[0]
+    turn = store.session_turns("S-mem")[0]
+    assert session["participant_id"] == anon
+    assert session["conversation_thread_id"] == ""
+    assert turn["participant_id"] == anon
+    assert turn["content_raw"] == "匿名應保留"
+
+
 def test_memory_store_preserves_identity_thread_and_raw_turn():
     store = MemoryStore("Asia/Taipei")
     participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")

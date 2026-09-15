@@ -1,6 +1,6 @@
 """Persistent research/login store. Production uses SQLite; Sheets code remains unused.
 
-API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。
+API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。若願意但選擇不記名，則將 Sessions／ChatLogs 改掛到 P-ANON-* 並切斷 thread 關聯。
 """
 
 from __future__ import annotations
@@ -446,6 +446,29 @@ class GoogleSheetsStore(WhitelistMixin):
         self._delete_by_key("Assessments", "session_id", sid)
         self._delete_by_key("SkillEvents", "session_id", sid)
 
+    def reassign_session_participant(self, session_id: str, participant_id: str) -> None:
+        sid = str(session_id or "")
+        pid = str(participant_id or "")
+        if not sid or not pid:
+            return
+        for row in self.all_records("Sessions"):
+            if str(row.get("session_id")) == sid:
+                updated = dict(row)
+                updated["participant_id"] = pid
+                updated["conversation_thread_id"] = ""
+                updated["case_id"] = ""
+                self._upsert_by_key("Sessions", "session_id", sid, updated)
+                break
+        for row in self.all_records("ChatLogs"):
+            if str(row.get("session_id")) != sid:
+                continue
+            updated = dict(row)
+            updated["participant_id"] = pid
+            updated["conversation_thread_id"] = ""
+            turn_id = str(updated.get("turn_id") or "") or str(uuid.uuid4())
+            updated["turn_id"] = turn_id
+            self._upsert_by_key("ChatLogs", "turn_id", turn_id, updated)
+
     def get_or_create_participant(self, email: str, role: str, participant_salt: str) -> str:
         normalized = email.strip().lower()
         records = self.all_records("IdentityMap")
@@ -572,6 +595,7 @@ class MemoryStore(WhitelistMixin, LoginSessionMixin):
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
     purge_session_transcript = GoogleSheetsStore.purge_session_transcript
+    reassign_session_participant = GoogleSheetsStore.reassign_session_participant
 
 
 class SqliteStore(WhitelistMixin, LoginSessionMixin):
@@ -658,6 +682,21 @@ class SqliteStore(WhitelistMixin, LoginSessionMixin):
             self.conn.execute(
                 f"DELETE FROM {self._quoted(sheet)} WHERE \"{key}\" = ?",
                 (str(value),),
+            )
+
+    def reassign_session_participant(self, session_id: str, participant_id: str) -> None:
+        sid = str(session_id or "")
+        pid = str(participant_id or "")
+        if not sid or not pid:
+            return
+        with self.conn:
+            self.conn.execute(
+                'UPDATE "Sessions" SET "participant_id" = ?, "conversation_thread_id" = ?, "case_id" = ? WHERE "session_id" = ?',
+                (pid, "", "", sid),
+            )
+            self.conn.execute(
+                'UPDATE "ChatLogs" SET "participant_id" = ?, "conversation_thread_id" = ? WHERE "session_id" = ?',
+                (pid, "", sid),
             )
 
     get_or_create_participant = GoogleSheetsStore.get_or_create_participant

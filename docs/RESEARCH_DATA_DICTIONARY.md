@@ -16,11 +16,15 @@ Google Sheets 由程式自動建立九張工作表。原始對話與原始模型
 
 ## Sessions
 
-保存 session_id、conversation_thread_id、participant_id、mode、AI 續談角色、起訖時間、使用秒數、case_id、school_id、預選技巧、模型與 prompt 版本、temperature、完成狀態、主題、難度，以及體驗模式結束時的 `research_consent`（`yes`／`no`；實作模式為空）。若學生不同意作為研究素材，該 Session 的 ChatLogs 會被刪除。
+保存 session_id、conversation_thread_id、participant_id、mode、AI 續談角色、起訖時間、使用秒數、case_id、school_id、預選技巧、模型與 prompt 版本、temperature、完成狀態、主題、難度，以及體驗模式結束時的 `research_consent`（`yes`／`no`／`anonymous`；實作模式為空）。
+
+- `no`：只留 Session 完成紀錄（學派、時間、時長等），刪除該次 ChatLogs、Assessments、SkillEvents，畫面上不顯示示範解析或諮商師原句。
+- `yes`：完整保留可連結帳號的晤談過程與示範解析。
+- `anonymous`：學生帳號另留一筆與 `no` 相同的完成紀錄（不含諮商過程）；晤談過程改掛到不進入 IdentityMap 的 `P-ANON-*`，保留逐輪內容與時間戳，並切斷 `conversation_thread_id`。研究匯出仍包含這些 ChatLogs，但排除 `research_consent=no` 的對話資料。
 
 ## ChatLogs
 
-每一輪一列，包含 turn_index、speaker_role、原始 `content_raw`、括弧非語言訊息、時間、延遲及錯誤狀態。`content_raw` 不可由後續重新評量覆寫。體驗模式若學生不同意作為研究素材，該 Session 的 ChatLogs 會整批刪除。
+每一輪一列，包含 turn_index、speaker_role、原始 `content_raw`、括弧非語言訊息、時間、延遲及錯誤狀態。`content_raw` 不可由後續重新評量覆寫。體驗模式若學生不同意作為研究素材，該 Session 的 ChatLogs 會整批刪除。若選擇不記名保存，ChatLogs 改為 `P-ANON-*` 且不含 thread／email 關聯。
 
 ## Threads
 
