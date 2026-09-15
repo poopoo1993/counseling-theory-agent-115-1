@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        --ink: #1c2422;
+        --muted: #5e6a66;
+        --line: #e2dcd2;
+        --sage: #3d6b63;
+        --sage-soft: #e7f0ed;
+        --surface: #fffdf8;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--ink);
+        font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+      .hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+      .label {
+        margin: 0 0 0.45rem;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.15rem;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      button {
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .use {
+        border: 0;
+        background: transparent;
+        color: var(--sage);
+        font-size: 0.82rem;
+        font-weight: 600;
+        padding: 0.32rem 0.75rem;
+      }
+      .use:hover {
+        background: var(--sage-soft);
+      }
+      .del {
+        border: 0;
+        border-left: 1px solid var(--line);
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1;
+        padding: 0.32rem 0.5rem;
+      }
+      .del:hover {
+        color: #8a3b32;
+        background: #f7ecea;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      const STORAGE_KEY = "counseling_theory_gemini_api_keys";
+      const MAX_KEYS = 8;
+
+      function post(type, extra) {
+        window.parent.postMessage(Object.assign({
+          isStreamlitMessage: true,
+          type: type
+        }, extra || {}), "*");
+      }
+
+      function setValue(value) {
+        post("streamlit:setComponentValue", { value: value });
+      }
+
+      function setHeight(height) {
+        post("streamlit:setFrameHeight", { height: height });
+      }
+
+      function canStore() {
+        try {
+          window.localStorage.setItem("__ct_key_probe", "1");
+          window.localStorage.removeItem("__ct_key_probe");
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function loadKeys() {
+        if (!canStore()) return [];
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]");
+          if (!Array.isArray(parsed)) return [];
+          return parsed.filter(function (item) {
+            return typeof item === "string" && item.trim();
+          });
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function saveKeys(keys) {
+        if (!canStore()) return;
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
+      }
+
+      function mask(key) {
+        const value = String(key || "").trim();
+        if (value.length <= 8) return "••••••••";
+        return value.slice(0, 4) + "…" + value.slice(-4);
+      }
+
+      function remember(key, keys) {
+        const value = String(key || "").trim();
+        if (!value) return keys;
+        return [value].concat(keys.filter(function (item) { return item !== value; })).slice(0, MAX_KEYS);
+      }
+
+      function render(args) {
+        const root = document.getElementById("root");
+        args = args || {};
+        if (!canStore()) {
+          root.innerHTML = '<p class="hint">這個瀏覽器無法記住 API Key，請每次手動輸入。</p>';
+          setHeight(Math.max(root.scrollHeight, 28));
+          return;
+        }
+        let keys = loadKeys();
+        const saveKey = String(args.save_key || "").trim();
+        if (saveKey) {
+          keys = remember(saveKey, keys);
+          saveKeys(keys);
+        }
+        if (args.hide) {
+          root.innerHTML = "";
+          setHeight(1);
+          return;
+        }
+        if (!keys.length) {
+          root.innerHTML = '<p class="hint">驗證成功後，這個瀏覽器會記住 Key，下次可直接點選。</p>';
+          setHeight(Math.max(root.scrollHeight, 28));
+          return;
+        }
+        root.innerHTML =
+          '<p class="label">用過的 API Key</p><div class="list">' +
+          keys.map(function (key, index) {
+            return (
+              '<span class="chip">' +
+                '<button class="use" type="button" data-index="' + index + '">' + mask(key) + "</button>" +
+                '<button class="del" type="button" data-index="' + index + '" aria-label="刪除">×</button>' +
+              "</span>"
+            );
+          }).join("") +
+          "</div>";
+        root.querySelectorAll(".use").forEach(function (button) {
+          button.addEventListener("click", function () {
+            const key = keys[Number(button.getAttribute("data-index"))];
+            setValue({ action: "select", key: key, ts: Date.now() });
+          });
+        });
+        root.querySelectorAll(".del").forEach(function (button) {
+          button.addEventListener("click", function () {
+            const key = keys[Number(button.getAttribute("data-index"))];
+            keys = keys.filter(function (item) { return item !== key; });
+            saveKeys(keys);
+            setValue({ action: "remove", key: key, ts: Date.now() });
+            render({ save_key: "" });
+          });
+        });
+        setHeight(Math.max(root.scrollHeight + 6, 40));
+      }
+
+      window.addEventListener("message", function (event) {
+        if (event.data && event.data.type === "streamlit:render") {
+          render(event.data.args || {});
+        }
+      });
+
+      post("streamlit:componentReady", { apiVersion: 1 });
+      setHeight(36);
+    </script>
+  </body>
+</html>

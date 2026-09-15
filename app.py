@@ -28,6 +28,7 @@ from src.auth import (
 )
 from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
 from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
+from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
 from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply
 from src.prompts import (
@@ -410,20 +411,28 @@ def student_access_error(settings: dict[str, str]) -> str | None:
 
 
 def api_key_gate() -> GeminiService | None:
+    picked = st.session_state.pop("picked_api_key", "")
+    if picked:
+        st.session_state.api_key_draft = picked
+        st.session_state.auto_test_api_key = True
+    if "api_key_draft" not in st.session_state:
+        st.session_state.api_key_draft = st.session_state.api_key
     with st.container(border=True):
         st.markdown('<p class="ct-kicker">開始前</p>', unsafe_allow_html=True)
         st.markdown("**連接你自己的 Gemini API Key**")
         st.caption(
             "請用個人的 @gmail.com 帳號到 Google AI Studio 申請 API Key。"
-            "Key 只留在目前瀏覽器工作階段，不會寫入 SQLite、逐字稿或研究資料。"
-            "重新整理後仍保持登入，但需再輸入一次 API Key。"
+            "驗證成功後，Key 只會留在這個瀏覽器，不會寫入 SQLite、逐字稿或研究資料。"
+            "共用電腦請點右側 × 刪除記住的 Key。"
         )
         st.link_button("前往 Google AI Studio", "https://aistudio.google.com/", use_container_width=True)
         key_col, action_col = st.columns([3.2, 1], gap="small", vertical_alignment="bottom")
         with key_col:
-            key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
+            key = st.text_input("Gemini API Key", type="password", key="api_key_draft")
         with action_col:
             tested = st.button("測試連線", type="primary", use_container_width=True)
+        if st.session_state.pop("auto_test_api_key", False) and str(key or "").strip():
+            tested = True
         if tested:
             try:
                 with st.spinner("正在測試連線…"):
@@ -433,14 +442,22 @@ def api_key_gate() -> GeminiService | None:
                         fallback_models=CONFIG.fallback_models,
                     )
                     service.validate_key()
-                st.session_state.api_key = key.strip()
+                st.session_state.api_key = str(key or "").strip()
                 st.session_state.api_validated = True
                 st.session_state.active_model_name = service.model_name
+                st.session_state._pending_save_api_key = st.session_state.api_key
+                render_saved_api_keys(save_key=st.session_state.api_key)
                 st.success("API Key 已驗證，可以開始練習。")
                 st.rerun()
             except Exception as exc:
                 st.session_state.api_validated = False
                 st.error(str(exc))
+        result = render_saved_api_keys()
+        if result and result.get("ts") != st.session_state.get("_api_key_event_ts"):
+            st.session_state._api_key_event_ts = result.get("ts")
+            if result.get("action") == "select" and result.get("key"):
+                st.session_state.picked_api_key = str(result["key"])
+                st.rerun()
     return None
 
 
@@ -484,7 +501,8 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
     session = st.session_state.active_session
     turns = st.session_state.prior_turns_context + st.session_state.turns
     coaching = live_coaching_enabled(session["mode"], str(session.get("difficulty", "")))
-    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context) or coaching
+    # 新模擬開場沒有學生話語，不必先打分析引擎，避免一次連發三個 Gemini 請求。
+    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
     if should_analyze:
         st.session_state.chat_analysis = analyze_chat(
             gemini(),
@@ -1028,9 +1046,12 @@ def student_page() -> None:
         apply_theme("student")
         show_online_people()
         render_header(show_notice=not bool(st.session_state.active_session))
+    pending_save = str(st.session_state.pop("_pending_save_api_key", "") or "")
     if not st.session_state.api_validated or not st.session_state.api_key:
         api_key_gate()
         return
+    if pending_save:
+        render_saved_api_keys(save_key=pending_save, hide=True)
     if st.session_state.active_session:
         if in_chat:
             render_chat()

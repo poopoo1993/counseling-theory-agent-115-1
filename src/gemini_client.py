@@ -28,11 +28,31 @@ RETRYABLE_MARKERS = (
     "temporarily unavailable",
     "空白內容",
 )
-NEXT_MODEL_MARKERS = RETRYABLE_MARKERS + (
+# 過載時只重試同一個模型，避免一次連打多個模型 ID。
+# 只有模型已下架／找不到時才改走備援。
+NEXT_MODEL_MARKERS = (
     "404",
     "not found",
     "not_found",
+    "no longer available",
     "not supported",
+)
+DEFAULT_MODEL_NAME = "gemini-flash-latest"
+DEFAULT_FALLBACK_MODELS: tuple[str, ...] = ()
+CONGESTED_ALIASES = {
+    "gemini-3.8-flash": DEFAULT_MODEL_NAME,
+}
+RETIRED_MODELS = frozenset(
+    {
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-latest",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-001",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-pro-exp",
+    }
 )
 
 
@@ -46,12 +66,52 @@ def should_try_next_model(exc: BaseException) -> bool:
     return any(token in message for token in NEXT_MODEL_MARKERS)
 
 
+def _strip_models_prefix(name: str) -> str:
+    value = str(name or "").strip()
+    if value.lower().startswith("models/"):
+        return value[7:]
+    return value
+
+
+def is_retired_model(name: str) -> bool:
+    return _strip_models_prefix(name).lower() in RETIRED_MODELS
+
+
+def canonical_model_name(name: str, default: str = DEFAULT_MODEL_NAME) -> str:
+    value = _strip_models_prefix(name)
+    if not value or is_retired_model(value):
+        return default
+    return CONGESTED_ALIASES.get(value, value)
+
+
+def sanitize_fallback_models(models: Sequence[str], primary: str) -> tuple[str, ...]:
+    primary_name = canonical_model_name(primary)
+    ordered: list[str] = []
+    for item in models:
+        value = _strip_models_prefix(item)
+        if not value or is_retired_model(value) or value == primary_name or value in ordered:
+            continue
+        ordered.append(value)
+    return tuple(ordered)
+
+
+def uses_gemini3_thinking(model_name: str) -> bool:
+    name = _strip_models_prefix(model_name).lower()
+    return name.startswith("gemini-3") or name in {
+        "gemini-flash-latest",
+        "gemini-pro-latest",
+        "gemini-flash-lite-latest",
+    }
+
+
 def format_gemini_error(exc: BaseException) -> str:
     message = str(exc).lower()
     if any(token in message for token in ("503", "unavailable", "high demand", "overloaded")):
         return "Gemini 目前用量過高，暫時無法回應。這通常很快會恢復，請稍候再試一次。"
     if any(token in message for token in ("429", "quota", "resource_exhausted")):
         return "Gemini API 用量或配額已達上限。請稍候再試，或到 Google AI Studio 檢查用量。"
+    if any(token in message for token in ("404", "not_found", "no longer available", "not found")):
+        return "指定的 Gemini 模型已停用或找不到。請改用最新 Flash 模型後再試。"
     return f"Gemini 呼叫失敗：{exc}"
 
 
@@ -74,7 +134,7 @@ def build_thinking_config(model_name: str, thinking_level: str = "low") -> Any |
     Installed google-genai versions disagree on the field name:
     newer SDKs use thinking_level; older ones only accept thinking_budget.
     """
-    if not str(model_name or "").startswith("gemini-3"):
+    if not uses_gemini3_thinking(model_name):
         return None
     names = _thinking_field_names()
     thinking_cls = getattr(types, "ThinkingConfig", None)
@@ -107,12 +167,8 @@ class GeminiService:
         if not api_key or not api_key.strip():
             raise ValueError("Gemini API Key 不可空白。")
         self.client = genai.Client(api_key=api_key.strip())
-        self.model_name = model_name
-        self.fallback_models = tuple(
-            str(name).strip()
-            for name in fallback_models
-            if str(name).strip() and str(name).strip() != model_name
-        )
+        self.model_name = canonical_model_name(model_name)
+        self.fallback_models = sanitize_fallback_models(fallback_models, self.model_name)
         self.on_model_used = on_model_used
 
     def _models_to_try(self) -> list[str]:
