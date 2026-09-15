@@ -197,10 +197,16 @@ def account_is_teacher(email: str | None = None) -> bool:
     return is_teacher(value, STORE, CONFIG.teacher_emails)
 
 
-def persist_thread_state(status: str = "in_progress") -> None:
+def persist_thread_state(status: str = "in_progress", *, include_turns: bool = True) -> None:
     session = st.session_state.active_session
     if not session:
         return
+    if include_turns:
+        recent = (st.session_state.prior_turns_context + st.session_state.turns)[-6:]
+        analysis = st.session_state.chat_analysis or {}
+    else:
+        recent = list(st.session_state.prior_turns_context or [])[-6:]
+        analysis = {}
     STORE.save_thread({
         "conversation_thread_id": session["conversation_thread_id"],
         "participant_id": session["participant_id"],
@@ -213,10 +219,10 @@ def persist_thread_state(status: str = "in_progress") -> None:
         "case_id": session.get("case_id", ""),
         "case_data": st.session_state.case_data or {},
         "counseling_plan": st.session_state.counseling_plan or {},
-        "chat_analysis": st.session_state.chat_analysis or {},
+        "chat_analysis": analysis,
         "latest_snapshot": st.session_state.continuation_snapshot or {},
         "last_session_id": session["session_id"],
-        "recent_turns": (st.session_state.prior_turns_context + st.session_state.turns)[-6:],
+        "recent_turns": recent,
         "difficulty": session.get("difficulty", ""),
         "updated_at": STORE.now(),
         "status": status,
@@ -909,8 +915,11 @@ def render_chat() -> None:
                     st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
             with action_col:
                 if st.button("結束晤談", use_container_width=True):
-                    finalize_session()
-                    st.rerun()
+                    if session["mode"] == "experience":
+                        request_experience_research_consent()
+                    else:
+                        finalize_session()
+                        st.rerun()
         for turn in st.session_state.turns:
             role = str(turn["speaker_role"])
             with st.chat_message("user" if role.startswith("student") else "assistant"):
@@ -975,10 +984,36 @@ def render_chat() -> None:
     st.rerun()
 
 
-def finalize_session() -> None:
+def request_experience_research_consent() -> None:
+    _open_experience_research_consent()
+
+
+@st.dialog("是否作為研究素材", dismissible=False)
+def _open_experience_research_consent() -> None:
+    st.markdown("這次你擔任個案。是否願意將此次晤談**逐字稿**作為教學研究素材？")
+    st.caption("選「不願意」後，系統會刪除本次對話逐字稿，研究匯出也不會包含這些內容。本頁仍可查看示範解析，但不會保存原句。")
+    keep_col, drop_col = st.columns(2, gap="small")
+    with keep_col:
+        if st.button("願意", type="primary", use_container_width=True):
+            finalize_session(keep_transcript=True)
+            st.rerun()
+    with drop_col:
+        if st.button("不願意", use_container_width=True):
+            finalize_session(keep_transcript=False)
+            st.rerun()
+
+
+def finalize_session(*, keep_transcript: bool = True) -> None:
     session = finish_session(st.session_state.active_session, CONFIG.timezone, "completed")
+    if session["mode"] == "experience":
+        session["research_consent"] = "yes" if keep_transcript else "no"
+    else:
+        session["research_consent"] = ""
+        keep_transcript = True
     st.session_state.active_session = session
     STORE.finish_session(session)
+    if not keep_transcript:
+        STORE.purge_session_transcript(session["session_id"])
     raw = ""
     parsed: dict[str, Any]
     try:
@@ -1003,7 +1038,11 @@ def finalize_session() -> None:
             "total_score": None,
             "strengths": [],
             "improvement_points": [],
-            "encouragement": "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。",
+            "encouragement": (
+                "本次晤談已結束；評量服務暫時無法完成。"
+                if not keep_transcript
+                else "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。"
+            ),
             "limitations": str(exc),
         }
 
@@ -1027,32 +1066,42 @@ def finalize_session() -> None:
         "parsed_json": parsed,
         "created_at": STORE.now(),
     }
-    STORE.save_assessment(record)
+    if keep_transcript:
+        STORE.save_assessment(record)
     st.session_state.assessment = parsed
-    st.session_state.raw_assessment = raw
+    st.session_state.raw_assessment = raw if keep_transcript else ""
 
-    try:
-        snapshot_raw = gemini().generate_text(
-            build_snapshot_prompt(
-                session["mode"], session["school_id"], session["selected_techniques"],
-                st.session_state.turns, st.session_state.continuation_snapshot,
-            ),
-            system_instruction="你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
-            temperature=0.1,
-            max_output_tokens=1600,
-            response_json=True,
-        )
-        snapshot = parse_json_response(snapshot_raw)
-    except Exception:
+    if keep_transcript:
+        try:
+            snapshot_raw = gemini().generate_text(
+                build_snapshot_prompt(
+                    session["mode"], session["school_id"], session["selected_techniques"],
+                    st.session_state.turns, st.session_state.continuation_snapshot,
+                ),
+                system_instruction="你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
+                temperature=0.1,
+                max_output_tokens=1600,
+                response_json=True,
+            )
+            snapshot = parse_json_response(snapshot_raw)
+        except Exception:
+            snapshot = {
+                "continuation_role": session["continuation_role"],
+                "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
+                "disclosed_topics": [],
+                "unfinished_issues": [],
+                "next_session_focus": [],
+            }
+    else:
         snapshot = {
             "continuation_role": session["continuation_role"],
-            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
+            "relationship_summary": "學生未同意保存逐字稿，續談時請重新建立關係與焦點。",
             "disclosed_topics": [],
             "unfinished_issues": [],
             "next_session_focus": [],
         }
     st.session_state.continuation_snapshot = snapshot
-    persist_thread_state("active")
+    persist_thread_state("active", include_turns=keep_transcript)
 
 
 def render_feedback(settings: dict[str, str]) -> None:
@@ -1064,7 +1113,10 @@ def render_feedback(settings: dict[str, str]) -> None:
         st.markdown(f"**{session['school_name']} · {mode_label(session['mode'])}**")
         render_chips(session["selected_technique_names"])
         if session["mode"] == "experience":
-            st.caption("你剛才擔任個案。逐字稿與示範解析已保存，之後可續談同一位 AI 諮商師。")
+            if str(session.get("research_consent") or "") == "no":
+                st.caption("依你的選擇，本次逐字稿已刪除，不會作為研究素材。示範解析僅供本頁查看。")
+            else:
+                st.caption("你剛才擔任個案。逐字稿與示範解析已保存，之後可續談同一位 AI 諮商師。")
         else:
             st.caption("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。之後可續談同一位 AI 對話角色。")
     if as_bool(settings.get("student_feedback_visible"), True):
@@ -1114,7 +1166,7 @@ def render_feedback(settings: dict[str, str]) -> None:
                 for item in assessment["technique_explanations"]:
                     name = next((t["name"] for t in get_school(session["school_id"])["techniques"] if t["id"] == item.get("technique_id")), item.get("technique_id", "技巧"))
                     with st.expander(name):
-                        if item.get("ai_quote"):
+                        if item.get("ai_quote") and str(session.get("research_consent") or "") != "no":
                             st.caption("AI 諮商師原句")
                             render_quote(item.get("ai_quote", ""))
                         st.write(f"使用理由：{item.get('why_used', '')}")
@@ -1130,16 +1182,20 @@ def render_feedback(settings: dict[str, str]) -> None:
     else:
         st.info("教師目前設定為不向學生顯示 AI 回饋；本次資料仍已保存供教師檢視。")
 
-    transcript = make_transcript_txt(session, st.session_state.turns)
+    kept = str(session.get("research_consent") or "") != "no"
     action_col, home_col = st.columns(2, gap="small")
     with action_col:
-        st.download_button(
-            "下載逐字稿 TXT",
-            transcript,
-            file_name=safe_filename(session["session_id"]),
-            mime="text/plain",
-            use_container_width=True,
-        )
+        if kept:
+            transcript = make_transcript_txt(session, st.session_state.turns)
+            st.download_button(
+                "下載逐字稿 TXT",
+                transcript,
+                file_name=safe_filename(session["session_id"]),
+                mime="text/plain",
+                use_container_width=True,
+            )
+        else:
+            st.caption("未保存逐字稿，因此沒有檔案可下載。")
     with home_col:
         if st.button("回到練習首頁", type="primary", use_container_width=True):
             st.session_state.active_session = None
@@ -1200,6 +1256,11 @@ def student_page() -> None:
 
 
 def export_research_zip() -> bytes:
+    declined = {
+        str(row.get("session_id"))
+        for row in STORE.all_records("Sessions")
+        if str(row.get("research_consent") or "") == "no"
+    }
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         for sheet in SCHEMAS:
@@ -1211,6 +1272,8 @@ def export_research_zip() -> bytes:
                 rows = [{key: row.get(key, "") for key in headers} for row in rows]
             else:
                 headers = SCHEMAS[sheet]
+                if sheet in {"ChatLogs", "Assessments", "SkillEvents"} and declined:
+                    rows = [row for row in rows if str(row.get("session_id")) not in declined]
             frame = pd.DataFrame(rows, columns=headers)
             zf.writestr(f"{sheet}.csv", frame.to_csv(index=False).encode("utf-8-sig"))
     return output.getvalue()
@@ -1341,8 +1404,13 @@ def teacher_dashboard() -> None:
             email_options = ["全部"] + sorted(str(x) for x in merged["email"].dropna().unique())
             selected_email = st.selectbox("依學校 Email 篩選", email_options)
             shown = completed if selected_email == "全部" else completed[completed["email"] == selected_email]
-            columns = [c for c in ["email", "started_at", "mode", "school_id", "selected_technique_names", "duration_seconds", "completion_status", "session_id"] if c in shown.columns]
-            st.dataframe(shown[columns], use_container_width=True, hide_index=True)
+            columns = [c for c in ["email", "started_at", "mode", "school_id", "selected_technique_names", "duration_seconds", "completion_status", "research_consent", "session_id"] if c in shown.columns]
+            display = shown[columns].copy()
+            if "research_consent" in display.columns:
+                display["research_consent"] = display["research_consent"].map(
+                    lambda x: {"yes": "同意", "no": "未同意"}.get(str(x), "—")
+                )
+            st.dataframe(display, use_container_width=True, hide_index=True)
             if not shown.empty:
                 session_ids = list(shown["session_id"].astype(str))
                 chosen = st.selectbox("查看單次 Session", session_ids, format_func=lambda x: f"{x[:8]}…")
@@ -1354,7 +1422,10 @@ def teacher_dashboard() -> None:
                 ])
                 turns = STORE.session_turns(chosen)
                 st.markdown("**逐字稿**")
-                render_transcript(turns)
+                if str(row.get("research_consent") or "") == "no":
+                    render_empty_state("學生未同意作為研究素材", "本次體驗的對話逐字稿已刪除，不會出現在研究匯出中。")
+                else:
+                    render_transcript(turns)
                 thread_id = str(row.get("conversation_thread_id", ""))
                 thread = next(
                     (t for t in STORE.all_records("Threads") if str(t.get("conversation_thread_id")) == thread_id),

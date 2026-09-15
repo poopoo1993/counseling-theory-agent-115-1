@@ -16,11 +16,11 @@ Google Sheets 由程式自動建立九張工作表。原始對話與原始模型
 
 ## Sessions
 
-保存 session_id、conversation_thread_id、participant_id、mode、AI 續談角色、起訖時間、使用秒數、case_id、school_id、預選技巧、模型與 prompt 版本、temperature、完成狀態、主題及難度。
+保存 session_id、conversation_thread_id、participant_id、mode、AI 續談角色、起訖時間、使用秒數、case_id、school_id、預選技巧、模型與 prompt 版本、temperature、完成狀態、主題、難度，以及體驗模式結束時的 `research_consent`（`yes`／`no`；實作模式為空）。若學生不同意作為研究素材，該 Session 的 ChatLogs 會被刪除。
 
 ## ChatLogs
 
-每一輪一列，包含 turn_index、speaker_role、原始 `content_raw`、括弧非語言訊息、時間、延遲及錯誤狀態。`content_raw` 不可由後續重新評量覆寫。
+每一輪一列，包含 turn_index、speaker_role、原始 `content_raw`、括弧非語言訊息、時間、延遲及錯誤狀態。`content_raw` 不可由後續重新評量覆寫。體驗模式若學生不同意作為研究素材，該 Session 的 ChatLogs 會整批刪除。
 
 ## Threads
 

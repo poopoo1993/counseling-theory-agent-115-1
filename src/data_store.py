@@ -1,6 +1,6 @@
 """Persistent research/login store. Production uses SQLite; Sheets code remains unused.
 
-API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫。
+API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ SCHEMAS: dict[str, list[str]] = {
         "continuation_role", "started_at", "ended_at", "duration_seconds", "case_id",
         "school_id", "selected_techniques", "selected_technique_names", "model_name",
         "prompt_version", "temperature", "completion_status", "theme", "difficulty",
+        "research_consent",
     ],
     "ChatLogs": [
         "turn_id", "session_id", "conversation_thread_id", "participant_id", "turn_index",
@@ -430,6 +431,21 @@ class GoogleSheetsStore(WhitelistMixin):
         else:
             ws.update(values=[values], range_name=f"A{row_index}")
 
+    def _delete_by_key(self, sheet: str, key: str, value: str) -> None:
+        ws = self.worksheets[sheet]
+        records = ws.get_all_records(default_blank="")
+        for index in range(len(records), 0, -1):
+            if str(records[index - 1].get(key, "")) == str(value):
+                ws.delete_rows(index + 1)
+
+    def purge_session_transcript(self, session_id: str) -> None:
+        sid = str(session_id or "")
+        if not sid:
+            return
+        self._delete_by_key("ChatLogs", "session_id", sid)
+        self._delete_by_key("Assessments", "session_id", sid)
+        self._delete_by_key("SkillEvents", "session_id", sid)
+
     def get_or_create_participant(self, email: str, role: str, participant_salt: str) -> str:
         normalized = email.strip().lower()
         records = self.all_records("IdentityMap")
@@ -555,6 +571,7 @@ class MemoryStore(WhitelistMixin, LoginSessionMixin):
     session_turns = GoogleSheetsStore.session_turns
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
+    purge_session_transcript = GoogleSheetsStore.purge_session_transcript
 
 
 class SqliteStore(WhitelistMixin, LoginSessionMixin):
@@ -656,4 +673,5 @@ class SqliteStore(WhitelistMixin, LoginSessionMixin):
     session_turns = GoogleSheetsStore.session_turns
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
+    purge_session_transcript = GoogleSheetsStore.purge_session_transcript
 

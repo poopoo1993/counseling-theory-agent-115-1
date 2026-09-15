@@ -89,6 +89,28 @@ def test_online_users_use_recent_last_seen(tmp_path):
     assert people[0]["role"] == "teacher"
 
 
+def test_purge_session_transcript_removes_only_that_session(tmp_path):
+    store = SqliteStore(str(tmp_path / "consent.sqlite"), "Asia/Taipei")
+    store.append_turn({"session_id": "keep", "turn_index": 1, "content_raw": "留下"})
+    store.append_turn({"session_id": "drop", "turn_index": 1, "content_raw": "刪除"})
+    store.save_assessment({
+        "assessment_id": "A1",
+        "session_id": "drop",
+        "skill_events": [{"technique_id": "automatic_thoughts", "evidence_quote": "刪除"}],
+    })
+    store.purge_session_transcript("drop")
+    assert store.session_turns("drop") == []
+    assert store.session_turns("keep")[0]["content_raw"] == "留下"
+    assert store.get_assessment("drop") is None
+    assert store.all_records("SkillEvents") == []
+
+
+def test_sessions_schema_includes_research_consent():
+    from src.data_store import SCHEMAS
+
+    assert "research_consent" in SCHEMAS["Sessions"]
+
+
 def test_memory_store_preserves_identity_thread_and_raw_turn():
     store = MemoryStore("Asia/Taipei")
     participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")

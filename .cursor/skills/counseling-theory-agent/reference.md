@@ -61,7 +61,7 @@ SQLite tables (same names as former worksheets). Append-only research events: Ch
 
 **IdentityMap:** `participant_id`, `email`, `created_at`, `last_login_at`, `role`
 
-**Sessions:** `session_id`, `conversation_thread_id`, `participant_id`, `agent_type` (always `theory`), `mode`, `continuation_role`, `started_at`, `ended_at`, `duration_seconds`, `case_id`, `school_id`, `selected_techniques`, `selected_technique_names`, `model_name`, `prompt_version`, `temperature`, `completion_status`, `theme`, `difficulty`
+**Sessions:** `session_id`, `conversation_thread_id`, `participant_id`, `agent_type` (always `theory`), `mode`, `continuation_role`, `started_at`, `ended_at`, `duration_seconds`, `case_id`, `school_id`, `selected_techniques`, `selected_technique_names`, `model_name`, `prompt_version`, `temperature`, `completion_status`, `theme`, `difficulty`, `research_consent` (`yes` / `no` after experience end-session dialog; empty for practice)
 
 **ChatLogs:** `turn_id`, `session_id`, `conversation_thread_id`, `participant_id`, `turn_index`, `speaker_role`, `speaker_id`, `content_raw`, `nonverbal_cues`, `timestamp`, `stage_at_turn`, `skill_labels`, `selected_skill_match`, `latency_ms`, `error_flag`
 

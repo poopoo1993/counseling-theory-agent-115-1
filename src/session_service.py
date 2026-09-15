@@ -52,6 +52,7 @@ def new_session(
         "completion_status": "in_progress",
         "theme": theme,
         "difficulty": difficulty,
+        "research_consent": "",
     }
 
 
