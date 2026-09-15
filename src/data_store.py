@@ -1,4 +1,4 @@
-"""Google Sheets 研究資料層。
+"""Persistent research/login store. Production uses SQLite; Sheets code remains unused.
 
 API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫。
 """
@@ -9,17 +9,18 @@ import base64
 import binascii
 import hashlib
 import json
+import sqlite3
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
-
-import gspread
 
 from .config import DEFAULT_SETTINGS
 
 
 SCHEMAS: dict[str, list[str]] = {
+    "whitelist": ["email", "role", "enabled", "created_at"],
     "IdentityMap": ["participant_id", "email", "created_at", "last_login_at", "role"],
     "Sessions": [
         "session_id", "conversation_thread_id", "participant_id", "agent_type", "mode",
@@ -34,7 +35,8 @@ SCHEMAS: dict[str, list[str]] = {
     ],
     "Threads": [
         "conversation_thread_id", "participant_id", "mode", "continuation_role", "school_id",
-        "school_name", "selected_techniques", "selected_technique_names", "case_id", "case_data", "latest_snapshot", "last_session_id",
+        "school_name", "selected_techniques", "selected_technique_names", "case_id", "case_data",
+        "counseling_plan", "chat_analysis", "latest_snapshot", "last_session_id",
         "recent_turns", "updated_at", "status",
     ],
     "Assessments": [
@@ -94,6 +96,57 @@ def parse_json_cell(value: Any, default: Any) -> Any:
         return default
 
 
+def _flag_enabled(value: Any) -> bool:
+    return str(value or "true").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+class WhitelistMixin:
+    def _whitelist_row(self, email: str) -> dict[str, Any] | None:
+        value = str(email or "").strip().lower()
+        return next(
+            (r for r in self.all_records("whitelist") if str(r.get("email", "")).lower() == value),
+            None,
+        )
+
+    def is_whitelisted(self, email: str) -> bool:
+        row = self._whitelist_row(email)
+        return bool(row) and _flag_enabled(row.get("enabled", "true"))
+
+    def get_whitelist_role(self, email: str) -> str:
+        row = self._whitelist_row(email)
+        if not row or not _flag_enabled(row.get("enabled", "true")):
+            return ""
+        return str(row.get("role", "student")).strip().lower() or "student"
+
+    def upsert_whitelist(self, email: str, role: str, enabled: bool = True) -> None:
+        value = str(email or "").strip().lower()
+        existing = self._whitelist_row(value) or {}
+        stored_role = (role or existing.get("role") or "student")
+        self._upsert_by_key("whitelist", "email", value, {
+            "email": value,
+            "role": str(stored_role).strip().lower() or "student",
+            "enabled": "true" if enabled else "false",
+            "created_at": existing.get("created_at") or self.now(),
+        })
+
+    def seed_whitelist(self, login_allowlist: tuple[str, ...], teacher_emails: tuple[str, ...]) -> None:
+        teachers = tuple(str(item).strip().lower() for item in teacher_emails if str(item).strip())
+        allow = tuple(str(item).strip().lower() for item in login_allowlist if str(item).strip())
+        for email in teachers:
+            existing = self._whitelist_row(email)
+            enabled = _flag_enabled(existing.get("enabled", "true")) if existing else True
+            self.upsert_whitelist(email, "teacher", enabled)
+        for email in allow:
+            if email in teachers or self._whitelist_row(email):
+                continue
+            self.upsert_whitelist(email, "student", True)
+
+    def list_whitelist(self) -> list[dict[str, Any]]:
+        rows = self.all_records("whitelist")
+        rows.sort(key=lambda r: str(r.get("email", "")))
+        return rows
+
+
 def normalize_private_key(value: Any) -> str:
     """Accept either a complete PEM key or the body-only legacy format."""
     key = str(value or "").strip().replace("\\n", "\n")
@@ -146,8 +199,10 @@ def validate_private_key_structure(pem: str) -> None:
         raise PrivateKeyIncompleteError
 
 
-class GoogleSheetsStore:
+class GoogleSheetsStore(WhitelistMixin):
     def __init__(self, spreadsheet_id: str, service_account: Mapping[str, Any], timezone: str):
+        import gspread
+
         credentials = dict(service_account)
         required = {"client_email", "token_uri", "private_key"}
         if any(not str(credentials.get(field, "")).strip() for field in required):
@@ -161,7 +216,7 @@ class GoogleSheetsStore:
             raise PrivateKeyParseError from None
         self.book = client.open_by_key(spreadsheet_id)
         self.timezone = timezone
-        self.worksheets: dict[str, gspread.Worksheet] = {}
+        self.worksheets: dict[str, Any] = {}
         self.ensure_schema()
 
     @classmethod
@@ -335,8 +390,8 @@ class GoogleSheetsStore:
         })
 
 
-class MemoryStore:
-    """僅供本機畫面測試；重新整理或換使用者後資料不保留。"""
+class MemoryStore(WhitelistMixin):
+    """僅供單元測試；重新整理或換使用者後資料不保留。"""
 
     def __init__(self, timezone: str):
         self.timezone = timezone
@@ -373,3 +428,98 @@ class MemoryStore:
     session_turns = GoogleSheetsStore.session_turns
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
+
+
+class SqliteStore(WhitelistMixin):
+    """Persistent login list and account chat. API keys must never be written here."""
+
+    def __init__(self, path: str, timezone: str):
+        self.path = str(path)
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.timezone = timezone
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.ensure_schema()
+
+    def now(self) -> str:
+        return datetime.now(ZoneInfo(self.timezone)).isoformat(timespec="seconds")
+
+    def _quoted(self, name: str) -> str:
+        if name not in SCHEMAS:
+            raise KeyError(name)
+        return '"' + name.replace('"', "") + '"'
+
+    def ensure_schema(self) -> None:
+        with self.conn:
+            for name, headers in SCHEMAS.items():
+                cols = ", ".join(f'"{header}" TEXT' for header in headers)
+                self.conn.execute(f"CREATE TABLE IF NOT EXISTS {self._quoted(name)} ({cols})")
+                existing = {
+                    str(row[1]) for row in self.conn.execute(f"PRAGMA table_info({self._quoted(name)})")
+                }
+                for header in headers:
+                    if header not in existing:
+                        self.conn.execute(
+                            f"ALTER TABLE {self._quoted(name)} ADD COLUMN \"{header}\" TEXT"
+                        )
+        settings = self.all_records("Settings")
+        if not settings:
+            for key, value in DEFAULT_SETTINGS.items():
+                self.append("Settings", {
+                    "key": key, "value": value, "updated_at": self.now(), "updated_by": "system",
+                })
+
+    def append(self, sheet: str, record: Mapping[str, Any]) -> None:
+        headers = SCHEMAS[sheet]
+        placeholders = ", ".join("?" for _ in headers)
+        columns = ", ".join(f'"{header}"' for header in headers)
+        values = [json_cell(record.get(key, "")) for key in headers]
+        with self.conn:
+            self.conn.execute(
+                f"INSERT INTO {self._quoted(sheet)} ({columns}) VALUES ({placeholders})",
+                values,
+            )
+
+    def all_records(self, sheet: str) -> list[dict[str, Any]]:
+        headers = SCHEMAS[sheet]
+        rows = self.conn.execute(f"SELECT * FROM {self._quoted(sheet)}").fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            mapping = dict(row)
+            results.append({header: mapping.get(header, "") if mapping.get(header) is not None else "" for header in headers})
+        return results
+
+    def _upsert_by_key(self, sheet: str, key: str, value: str, record: Mapping[str, Any]) -> None:
+        headers = SCHEMAS[sheet]
+        existing = self.conn.execute(
+            f"SELECT 1 FROM {self._quoted(sheet)} WHERE \"{key}\" = ? LIMIT 1",
+            (str(value),),
+        ).fetchone()
+        payload = {header: json_cell(record.get(header, "")) for header in headers}
+        payload[key] = json_cell(value) if key in headers else payload.get(key, json_cell(value))
+        if existing is None:
+            self.append(sheet, record)
+            return
+        assignments = ", ".join(f'"{header}" = ?' for header in headers if header != key)
+        values = [payload[header] for header in headers if header != key]
+        values.append(str(value))
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE {self._quoted(sheet)} SET {assignments} WHERE \"{key}\" = ?",
+                values,
+            )
+
+    get_or_create_participant = GoogleSheetsStore.get_or_create_participant
+    start_session = GoogleSheetsStore.start_session
+    finish_session = GoogleSheetsStore.finish_session
+    append_turn = GoogleSheetsStore.append_turn
+    save_thread = GoogleSheetsStore.save_thread
+    list_threads = GoogleSheetsStore.list_threads
+    save_assessment = GoogleSheetsStore.save_assessment
+    get_settings = GoogleSheetsStore.get_settings
+    save_setting = GoogleSheetsStore.save_setting
+    count_sessions = GoogleSheetsStore.count_sessions
+    session_turns = GoogleSheetsStore.session_turns
+    get_assessment = GoogleSheetsStore.get_assessment
+    add_teacher_grade = GoogleSheetsStore.add_teacher_grade
+

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import time
 import uuid
 import zipfile
@@ -14,14 +13,14 @@ import streamlit as st
 
 from src.auth import create_otp, is_email_allowed, is_teacher, normalize_email, send_otp_email, verify_otp
 from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
-from src.data_store import GoogleSheetsStore, MemoryStore, SCHEMAS, json_cell, parse_json_cell
+from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
 from src.gemini_client import GeminiService, parse_json_response
+from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply
 from src.prompts import (
-    build_case_prompt,
-    build_dialogue_prompt,
     build_experience_analysis_prompt,
     build_practice_evaluator_prompt,
     build_snapshot_prompt,
+    case_data_from_plan,
 )
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
 from src.session_service import finish_session, new_session, new_turn
@@ -54,6 +53,8 @@ def initialize_state() -> None:
         "active_session": None,
         "turns": [],
         "case_data": None,
+        "counseling_plan": None,
+        "chat_analysis": None,
         "continuation_snapshot": None,
         "prior_turns_context": [],
         "assessment": None,
@@ -72,26 +73,18 @@ initialize_state()
 
 
 @st.cache_resource(show_spinner=False)
-def build_shared_store(serialized_secrets: str, timezone: str):
-    values = json.loads(serialized_secrets)
-    return GoogleSheetsStore.from_secrets(values, timezone)
+def build_shared_store(sqlite_path: str, timezone: str):
+    return SqliteStore(sqlite_path, timezone)
 
 
 def get_store():
     if "data_store" in st.session_state:
         return st.session_state.data_store
-    try:
-        store = build_shared_store(json.dumps(SECRETS, sort_keys=True), CONFIG.timezone)
-        st.session_state.store_mode = "google_sheets"
-    except Exception as exc:
-        store = MemoryStore(CONFIG.timezone)
-        st.session_state.store_mode = "memory"
-        # Never expose credential fragments returned by google-auth/cryptography.
-        st.session_state.store_error = (
-            "Google Sheets 驗證失敗"
-            f"（安全錯誤類型：{type(exc).__name__}）。"
-            "請檢查服務帳戶欄位、private_key 格式與試算表共用權限。"
-        )
+    app = SECRETS.get("app", {}) if isinstance(SECRETS.get("app"), dict) else {}
+    sqlite_path = str(app.get("sqlite_path", "data/app.sqlite")).strip() or "data/app.sqlite"
+    store = build_shared_store(sqlite_path, CONFIG.timezone)
+    store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
+    st.session_state.store_mode = "sqlite"
     st.session_state.data_store = store
     return store
 
@@ -116,6 +109,36 @@ def local_demo_enabled() -> bool:
     return as_bool(SECRETS.get("app", {}).get("local_demo_mode", False))
 
 
+def account_is_teacher(email: str | None = None) -> bool:
+    value = email if email is not None else str(st.session_state.get("email", ""))
+    return is_teacher(value, STORE, CONFIG.teacher_emails)
+
+
+def persist_thread_state(status: str = "in_progress") -> None:
+    session = st.session_state.active_session
+    if not session:
+        return
+    STORE.save_thread({
+        "conversation_thread_id": session["conversation_thread_id"],
+        "participant_id": session["participant_id"],
+        "mode": session["mode"],
+        "continuation_role": session["continuation_role"],
+        "school_id": session["school_id"],
+        "school_name": session["school_name"],
+        "selected_techniques": session["selected_techniques"],
+        "selected_technique_names": session["selected_technique_names"],
+        "case_id": session.get("case_id", ""),
+        "case_data": st.session_state.case_data or {},
+        "counseling_plan": st.session_state.counseling_plan or {},
+        "chat_analysis": st.session_state.chat_analysis or {},
+        "latest_snapshot": st.session_state.continuation_snapshot or {},
+        "last_session_id": session["session_id"],
+        "recent_turns": (st.session_state.prior_turns_context + st.session_state.turns)[-6:],
+        "updated_at": STORE.now(),
+        "status": status,
+    })
+
+
 def logout() -> None:
     for key in list(st.session_state.keys()):
         if key not in {"data_store", "store_mode", "store_error"}:
@@ -135,21 +158,14 @@ def render_header() -> None:
 
 def login_page() -> None:
     render_header()
-    if st.session_state.store_mode == "memory" and not local_demo_enabled():
-        st.error(
-            "Google Sheets 尚未連線，為避免學生練習紀錄遺失，正式模式已停止登入。"
-            "請先完成 Streamlit Secrets 與試算表共用權限設定。"
-        )
-        st.caption(st.session_state.get("store_error", ""))
-        return
     st.subheader("登入")
-    st.write("學生請用學校 `@hcu.edu.tw` 信箱接收驗證碼。教師測試帳號須列在系統白名單中。")
+    st.write("僅白名單 Email 可登入。請向授課教師申請後，再用該信箱收取驗證碼。")
     email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email))
     col1, col2 = st.columns(2)
     with col1:
         if st.button("寄送驗證碼", use_container_width=True):
-            if not is_email_allowed(email, CONFIG.allowed_domains, CONFIG.login_allowlist):
-                st.error("此信箱不在允許的學校網域或測試白名單中。")
+            if not is_email_allowed(email, STORE):
+                st.error("此信箱不在登入白名單中。請向授課教師申請。")
             elif time.time() - float(st.session_state.otp_last_sent or 0) < 60:
                 st.error("請等待 60 秒後再重新寄送驗證碼。")
             else:
@@ -171,10 +187,14 @@ def login_page() -> None:
         if st.button("驗證並登入", use_container_width=True):
             if email != st.session_state.otp_email:
                 st.error("目前輸入的 Email 與接收驗證碼的 Email 不同。")
+            elif not is_email_allowed(email, STORE):
+                st.error("此信箱不在登入白名單中。")
             elif not verify_otp(otp, st.session_state.otp_hash, st.session_state.otp_expires):
                 st.error("驗證碼錯誤或已逾時。")
             else:
-                role = "teacher" if is_teacher(email, CONFIG.teacher_emails) else "student"
+                role = STORE.get_whitelist_role(email) or (
+                    "teacher" if account_is_teacher(email) else "student"
+                )
                 participant_id = STORE.get_or_create_participant(email, role, participant_salt())
                 st.session_state.authenticated = True
                 st.session_state.email = email
@@ -182,15 +202,12 @@ def login_page() -> None:
                 st.session_state.view = "teacher" if role == "teacher" else "student"
                 st.rerun()
 
-    if st.session_state.store_mode == "memory":
-        st.info("目前為本機暫存模式；部署正式版前必須完成 Google Sheets Secrets 設定。")
-
 
 def sidebar() -> None:
     with st.sidebar:
         st.markdown(f"**已登入：** {st.session_state.email}")
         st.caption(f"教學代碼：{st.session_state.participant_id}")
-        if is_teacher(st.session_state.email, CONFIG.teacher_emails):
+        if account_is_teacher():
             st.session_state.view = st.radio(
                 "使用介面", ["student", "teacher"],
                 format_func=lambda x: "學生模擬端" if x == "student" else "教師後台",
@@ -245,7 +262,7 @@ def api_key_gate() -> GeminiService | None:
     st.subheader("連接你自己的 Gemini API Key")
     st.write(
         "請用個人的 `@gmail.com` 帳號到 Google AI Studio 申請 API Key，再貼到下方。"
-        "Key 僅保留於目前瀏覽器工作階段，不會寫入 Google Sheets、逐字稿或研究資料。"
+        "Key 僅保留於目前瀏覽器工作階段，不會寫入 SQLite、逐字稿或研究資料。"
     )
     key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
     if st.button("測試 API Key"):
@@ -274,19 +291,33 @@ def store_turn(turn: dict[str, Any]) -> None:
 
 def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None:
     session = st.session_state.active_session
-    system, prompt = build_dialogue_prompt(
+    turns = st.session_state.prior_turns_context + st.session_state.turns
+    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
+    if should_analyze:
+        st.session_state.chat_analysis = analyze_chat(
+            gemini(),
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            counseling_plan=st.session_state.counseling_plan,
+            prior_analysis=st.session_state.chat_analysis,
+            turns=turns,
+            latest_student_message=latest_student_message,
+        )
+        persist_thread_state("in_progress")
+    response, latency = generate_chat_reply(
+        gemini(),
         mode=session["mode"],
         school_id=session["school_id"],
         selected_ids=session["selected_techniques"],
-        turns=st.session_state.prior_turns_context + st.session_state.turns,
+        turns=turns,
         latest_student_message=latest_student_message,
         case_data=st.session_state.case_data,
         continuation_snapshot=st.session_state.continuation_snapshot,
+        counseling_plan=st.session_state.counseling_plan,
+        chat_analysis=st.session_state.chat_analysis,
         is_opening=is_opening,
     )
-    started = time.perf_counter()
-    response = gemini().generate_text(prompt, system_instruction=system, temperature=0.55, max_output_tokens=550)
-    latency = int((time.perf_counter() - started) * 1000)
     role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
     store_turn(new_turn(
         session=session,
@@ -296,22 +327,21 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
         timezone=CONFIG.timezone,
         latency_ms=latency,
     ))
+    persist_thread_state("in_progress")
 
 
 def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
     validate_selected_techniques(school_id, selected_ids)
-    case_data = None
-    case_id = "student_topic"
-    if mode == "practice":
-        raw_case = gemini().generate_text(
-            build_case_prompt(school_id, selected_ids, theme, difficulty),
-            system_instruction="你是標準化諮商教學案例設計器，只輸出符合 schema 的 JSON。",
-            temperature=0.65,
-            max_output_tokens=1500,
-            response_json=True,
-        )
-        case_data = parse_json_response(raw_case)
-        case_id = str(case_data.get("case_id", f"case-{uuid.uuid4().hex[:8]}"))
+    plan = create_counseling_plan(
+        gemini(),
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        theme=theme,
+        difficulty=difficulty,
+    )
+    case_data = case_data_from_plan(plan) if mode == "practice" else None
+    case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
     session = new_session(
         participant_id=st.session_state.participant_id,
         mode=mode,
@@ -327,10 +357,13 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
     st.session_state.active_session = session
     st.session_state.turns = []
     st.session_state.case_data = case_data
+    st.session_state.counseling_plan = plan
+    st.session_state.chat_analysis = None
     st.session_state.continuation_snapshot = None
     st.session_state.prior_turns_context = []
     st.session_state.assessment = None
     STORE.start_session(session)
+    persist_thread_state("in_progress")
     generate_ai_turn(is_opening=True)
 
 
@@ -354,10 +387,26 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     st.session_state.active_session = session
     st.session_state.turns = []
     st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
+    st.session_state.counseling_plan = parse_json_cell(thread.get("counseling_plan"), {})
+    st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
     st.session_state.assessment = None
+    st.session_state.counseling_plan = create_counseling_plan(
+        gemini(),
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        theme="續談上次議題",
+        difficulty="延續前次",
+        prior_snapshot=st.session_state.continuation_snapshot,
+        prior_plan=st.session_state.counseling_plan,
+        prior_analysis=st.session_state.chat_analysis,
+    )
+    if mode == "practice":
+        st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
     STORE.start_session(session)
+    persist_thread_state("in_progress")
     generate_ai_turn(is_opening=True)
 
 
@@ -398,7 +447,7 @@ def new_practice_panel(settings: dict[str, str]) -> None:
             st.error("開始前必須選擇恰好三項技巧。")
             return
         try:
-            with st.spinner("正在建立一致的模擬角色與開場…"):
+            with st.spinner("正在擬定學派計畫並建立開場…"):
                 start_new_session(mode, school_id, list(selected), PRACTICE_THEMES[theme_id], difficulty)
             st.rerun()
         except Exception as exc:
@@ -527,7 +576,7 @@ def render_chat() -> None:
         STORE.finish_session(st.session_state.active_session)
         st.rerun()
     try:
-        with st.spinner("AI 正在回應…"):
+        with st.spinner("正在分析對話並回應…"):
             generate_ai_turn(is_opening=False, latest_student_message=prompt)
     except Exception as exc:
         store_turn(new_turn(
@@ -617,23 +666,8 @@ def finalize_session() -> None:
             "unfinished_issues": [],
             "next_session_focus": [],
         }
-    STORE.save_thread({
-        "conversation_thread_id": session["conversation_thread_id"],
-        "participant_id": session["participant_id"],
-        "mode": session["mode"],
-        "continuation_role": session["continuation_role"],
-        "school_id": session["school_id"],
-        "school_name": session["school_name"],
-        "selected_techniques": session["selected_techniques"],
-        "selected_technique_names": session["selected_technique_names"],
-        "case_id": session["case_id"],
-        "case_data": st.session_state.case_data or {},
-        "latest_snapshot": snapshot,
-        "last_session_id": session["session_id"],
-        "recent_turns": st.session_state.turns[-6:],
-        "updated_at": STORE.now(),
-        "status": "active",
-    })
+    st.session_state.continuation_snapshot = snapshot
+    persist_thread_state("active")
 
 
 def render_feedback(settings: dict[str, str]) -> None:
@@ -694,6 +728,8 @@ def render_feedback(settings: dict[str, str]) -> None:
         st.session_state.active_session = None
         st.session_state.turns = []
         st.session_state.case_data = None
+        st.session_state.counseling_plan = None
+        st.session_state.chat_analysis = None
         st.session_state.continuation_snapshot = None
         st.session_state.prior_turns_context = []
         st.session_state.assessment = None
@@ -704,7 +740,7 @@ def student_page() -> None:
     render_header()
     settings = settings_with_defaults()
     error = student_access_error(settings)
-    if error and not is_teacher(st.session_state.email, CONFIG.teacher_emails):
+    if error and not account_is_teacher():
         st.error(error)
         return
     if not st.session_state.api_validated or not st.session_state.api_key:
@@ -773,15 +809,49 @@ def teacher_settings_panel(settings: dict[str, str]) -> None:
                 st.error(f"設定未儲存：{exc}")
 
 
+def teacher_whitelist_panel() -> None:
+    st.subheader("登入白名單")
+    st.caption("只有 enabled 的 Email 可以收取 OTP 並登入。學生無法自行註冊。")
+    rows = STORE.list_whitelist()
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("白名單尚無資料。請新增學生 Email，或在 Secrets 的 teacher_emails／login_allowlist 種子帳號。")
+    with st.form("add_whitelist"):
+        new_email = st.text_input("新增 Email")
+        new_role = st.selectbox("角色", ["student", "teacher"], format_func=lambda x: "學生" if x == "student" else "教師")
+        if st.form_submit_button("加入白名單"):
+            value = normalize_email(new_email)
+            if "@" not in value:
+                st.error("請輸入有效 Email。")
+            else:
+                STORE.upsert_whitelist(value, new_role, True)
+                st.success(f"已加入：{value}")
+                st.rerun()
+    if rows:
+        target = st.selectbox(
+            "停用或重新啟用",
+            [str(r.get("email", "")) for r in rows],
+        )
+        col1, col2 = st.columns(2)
+        role = next((str(r.get("role", "student")) for r in rows if r.get("email") == target), "student")
+        with col1:
+            if st.button("停用此 Email", use_container_width=True):
+                STORE.upsert_whitelist(target, role, False)
+                st.rerun()
+        with col2:
+            if st.button("重新啟用此 Email", use_container_width=True):
+                STORE.upsert_whitelist(target, role, True)
+                st.rerun()
+
+
 def teacher_dashboard() -> None:
     render_header()
-    if not is_teacher(st.session_state.email, CONFIG.teacher_emails):
+    if not account_is_teacher():
         st.error("此帳號沒有教師後台權限。")
         return
-    if st.session_state.store_mode == "memory":
-        st.warning("目前是本機暫存模式，無法查看其他學生資料；請完成 Google Sheets 設定。")
     settings = settings_with_defaults()
-    tab1, tab2, tab3 = st.tabs(["學生進度與逐字稿", "開放設定", "研究資料匯出"])
+    tab1, tab2, tab3, tab4 = st.tabs(["學生進度與逐字稿", "登入白名單", "開放設定", "研究資料匯出"])
     with tab1:
         sessions = STORE.all_records("Sessions")
         identities = STORE.all_records("IdentityMap")
@@ -810,6 +880,16 @@ def teacher_dashboard() -> None:
                 turns = STORE.session_turns(chosen)
                 for turn in turns:
                     st.write(f"**[{turn.get('turn_index')}] {turn.get('speaker_role')}：** {turn.get('content_raw')}")
+                thread_id = str(row.get("conversation_thread_id", ""))
+                thread = next(
+                    (t for t in STORE.all_records("Threads") if str(t.get("conversation_thread_id")) == thread_id),
+                    None,
+                )
+                if thread:
+                    st.markdown("### 內部諮商計畫（學生不可見）")
+                    st.json(parse_json_cell(thread.get("counseling_plan"), {}), expanded=False)
+                    st.markdown("### 內部對話分析（學生不可見）")
+                    st.json(parse_json_cell(thread.get("chat_analysis"), {}), expanded=False)
                 assessment = STORE.get_assessment(chosen)
                 if assessment:
                     st.markdown("### AI 原始形成性回饋")
@@ -827,9 +907,11 @@ def teacher_dashboard() -> None:
                         )
                         st.success("教師評量已另存，不會覆寫 AI 原始結果。")
     with tab2:
-        teacher_settings_panel(settings)
+        teacher_whitelist_panel()
     with tab3:
-        st.write("匯出包含 Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。IdentityMap 含 Email，研究去識別化時應單獨保管或移除。")
+        teacher_settings_panel(settings)
+    with tab4:
+        st.write("匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。whitelist 與 IdentityMap 含 Email，研究去識別化時應單獨保管或移除。")
         try:
             payload = export_research_zip()
             st.download_button(

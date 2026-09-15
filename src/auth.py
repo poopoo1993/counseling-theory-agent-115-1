@@ -14,18 +14,24 @@ def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
 
-def is_email_allowed(email: str, allowed_domains: tuple[str, ...], allowlist: tuple[str, ...]) -> bool:
+def is_valid_email(email: str) -> bool:
     value = normalize_email(email)
-    if not value or "@" not in value:
+    return bool(value) and "@" in value and "." in value.rsplit("@", 1)[-1]
+
+
+def is_email_allowed(email: str, store: Any) -> bool:
+    """Login is SQLite whitelist only; school-domain shortcut is not used."""
+    value = normalize_email(email)
+    if not is_valid_email(value):
         return False
-    if value in allowlist:
-        return True
-    domain = value.rsplit("@", 1)[1]
-    return domain in allowed_domains
+    return bool(store.is_whitelisted(value))
 
 
-def is_teacher(email: str, teacher_emails: tuple[str, ...]) -> bool:
-    return normalize_email(email) in teacher_emails
+def is_teacher(email: str, store: Any, fallback_teacher_emails: tuple[str, ...] = ()) -> bool:
+    role = store.get_whitelist_role(email)
+    if role:
+        return role == "teacher"
+    return normalize_email(email) in fallback_teacher_emails
 
 
 def create_otp(ttl_seconds: int = 600) -> tuple[str, str, float]:

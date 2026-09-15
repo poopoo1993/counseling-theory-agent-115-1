@@ -66,7 +66,7 @@ assert "不得變成教師" in system
 
 Experience system must contain the school name as 示範諮商師 and must forbid 技巧名稱 mid-session.
 
-## Local demo without Sheets
+## Local demo with SQLite
 
 In gitignored `.streamlit/secrets.toml`:
 
@@ -74,7 +74,11 @@ In gitignored `.streamlit/secrets.toml`:
 [app]
 local_demo_mode = true
 title = "諮商理論技巧訓練 Agent"
-teacher_test_emails = ["you@example.com"]
+sqlite_path = "data/app.sqlite"
+
+[auth]
+teacher_emails = ["you@example.com"]
+login_allowlist = ["you@example.com"]
 ```
 
-Login shows the OTP on screen. Data dies on refresh. Never enable `local_demo_mode` in production Secrets if research logs must persist.
+Login shows the OTP on screen. Chat persists in SQLite across refresh. Seed teachers/students into whitelist; do not rely on open `@hcu.edu.tw` domain login.

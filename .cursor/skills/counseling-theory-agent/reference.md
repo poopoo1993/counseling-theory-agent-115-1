@@ -53,9 +53,11 @@ Exact default ID lists live in `src/theory_library.py`. Technique object shape:
 
 Teacher dashboard lists sessions with `completed` or `safety_stopped`.
 
-## Sheets (`SCHEMAS`)
+## Sheets / SQLite (`SCHEMAS`)
 
-Nine worksheets. Append-only research events: ChatLogs, Assessments, SkillEvents, TeacherGrades, RiskEvents. Upserts: IdentityMap (`participant_id`), Sessions (`session_id`), Threads (`conversation_thread_id`), Settings (`key`).
+SQLite tables (same names as former worksheets). Append-only research events: ChatLogs, Assessments, SkillEvents, TeacherGrades, RiskEvents. Upserts: whitelist (`email`), IdentityMap (`participant_id`), Sessions (`session_id`), Threads (`conversation_thread_id`), Settings (`key`).
+
+**whitelist:** `email`, `role`, `enabled`, `created_at`
 
 **IdentityMap:** `participant_id`, `email`, `created_at`, `last_login_at`, `role`
 
@@ -63,7 +65,7 @@ Nine worksheets. Append-only research events: ChatLogs, Assessments, SkillEvents
 
 **ChatLogs:** `turn_id`, `session_id`, `conversation_thread_id`, `participant_id`, `turn_index`, `speaker_role`, `speaker_id`, `content_raw`, `nonverbal_cues`, `timestamp`, `stage_at_turn`, `skill_labels`, `selected_skill_match`, `latency_ms`, `error_flag`
 
-**Threads:** `conversation_thread_id`, `participant_id`, `mode`, `continuation_role`, `school_id`, `school_name`, `selected_techniques`, `selected_technique_names`, `case_id`, `case_data`, `latest_snapshot`, `last_session_id`, `recent_turns`, `updated_at`, `status`
+**Threads:** `conversation_thread_id`, `participant_id`, `mode`, `continuation_role`, `school_id`, `school_name`, `selected_techniques`, `selected_technique_names`, `case_id`, `case_data`, `counseling_plan`, `chat_analysis`, `latest_snapshot`, `last_session_id`, `recent_turns`, `updated_at`, `status`
 
 **Assessments:** `assessment_id`, `session_id`, `participant_id`, `mode`, `school_id`, `rubric_version`, `total_score`, `dimension_scores`, `skill_events`, `strengths`, `improvement_points`, `quoted_examples`, `next_practice_focus`, `encouragement`, `raw_model_output`, `parsed_json`, `created_at`
 
@@ -79,7 +81,7 @@ Default settings keys: `system_enabled`, `open_start`, `open_end`, `max_sessions
 
 ## Practice case JSON
 
-Generated at practice session start (`response_json=True`):
+Produced by the **planner** at practice session start (`response_json=True`), not a separate case-only call:
 
 - `case_id`, `display_name`, `public_opening`, `persona`, `presenting_problem`
 - `hidden_formulation` (never shown to student)
@@ -118,8 +120,9 @@ Thread stores last **6** turns as `recent_turns`. Dialogue prompt also receives 
 
 | Call | temperature | max_output_tokens | JSON |
 | --- | --- | --- | --- |
-| Dialogue | 0.55 | 550 | no |
-| Case | 0.65 | 1500 | yes |
+| Planner | 0.65 | 1500 | yes |
+| Analyzer | 0.1 | 1600 | yes |
+| Chatbot (dialogue) | 0.55 | 550 | no |
 | Evaluator / experience analysis | 0.1 | 3200 | yes |
 | Snapshot | 0.1 | 1600 | yes |
 | API key test | 0.0 | 256 | no |
@@ -128,11 +131,12 @@ Retry 3 times on 429/quota/timeout/503. Default model config: `gemini-3.8-flash`
 
 ## Auth and config
 
-- Allowed domain default: `hcu.edu.tw`. Allowlist bypasses domain.
+- Login: enabled SQLite `whitelist` row, then OTP. No open school-domain login.
+- Seed: `[auth].login_allowlist` + `[auth].teacher_emails` (legacy `[app].teacher_test_emails`).
 - OTP: 6 digits, hashed `salt:sha256` in session state, default TTL 600s, resend cooldown 60s.
-- `local_demo_mode`: show OTP on screen; allow login with MemoryStore.
+- `local_demo_mode`: show OTP on screen.
 - `participant_salt` under `[auth]` or `[app]`.
-- Config also reads `allowed_domains` / singular `allowed_domain`.
+- SQLite path: `[app].sqlite_path` default `data/app.sqlite`.
 
 ## Safety
 
