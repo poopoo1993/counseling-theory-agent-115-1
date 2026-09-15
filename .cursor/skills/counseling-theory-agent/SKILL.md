@@ -30,7 +30,7 @@ Do not violate these unless the user explicitly changes the product contract:
 5. **`ChatLogs.content_raw` is append-only.** Preserve full text, including parenthetical nonverbal cues. Do not rewrite past turns when re-scoring.
 6. **Student Gemini API Key stays in Streamlit session memory.** Never write it to SQLite, transcripts, logs, or exceptions.
 7. **User-facing copy and model prompts are Traditional Chinese.** Identifiers (`school_id`, `technique_id`) are English `snake_case`.
-8. **Login is SQLite whitelist + OTP.** Domain shortcut is not used. Seed from secrets; teachers can add/disable emails.
+8. **Login is SQLite whitelist + OTP, then password.** First login uses OTP and must set a password. Later logins may use the password. Domain shortcut is not used. Seed from secrets; teachers can add/disable emails. Never store plaintext passwords or API keys.
 
 ## Directory map
 
@@ -128,7 +128,7 @@ After library edits: 11 schools, 5 techniques, 3 defaults. After prompt edits: r
 ## Gotchas
 
 - **SQLite is the login/chat store.** Path `app.sqlite_path` default `data/app.sqlite` (gitignored). Login does not require Google Sheets. `GoogleSheetsStore` remains in code but is unused.
-- **Whitelist:** `is_email_allowed(email, store)` checks enabled SQLite rows only. Seed from `[auth].login_allowlist` and `[auth].teacher_emails` (or legacy `[app].teacher_test_emails`). Disabled rows cannot receive OTP.
+- **Whitelist:** `is_email_allowed(email, store)` checks enabled SQLite rows only. Seed from `[auth].login_allowlist` and `[auth].teacher_emails` (or legacy `[app].teacher_test_emails`). Disabled rows cannot receive OTP. After first OTP, user sets a password (`whitelist.password_hash`). Default teacher `poopoo1993@gmail.com` is seeded with a password if missing. Never export `password_hash`.
 - **SMTP:** `[smtp]` or `[email]`. `local_demo_mode` only shows OTP on screen.
 - **Gemini 3:** Prefer `thinking_config.thinking_level=low` when the installed `google-genai` ThinkingConfig has that field. Older SDKs (e.g. 1.47) only allow `thinking_budget` and reject `thinking_level` with pydantic `extra_forbidden`. Inspect fields, fall back to `thinking_budget=0` for low, and omit thinking_config if GenerateContentConfig still rejects it.
 - **Browser refresh:** Streamlit `session_state` is wiped on F5. Login is restored from a hashed `sid` query token in SQLite `AuthSessions` (TTL 12h). Never store the Gemini API Key there; refresh stays logged in but the key must be re-entered. Logout deletes the token. Skip `AuthSessions` in research ZIP export.

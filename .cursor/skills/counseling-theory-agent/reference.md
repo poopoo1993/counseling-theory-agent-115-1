@@ -57,7 +57,7 @@ Teacher dashboard lists sessions with `completed` or `safety_stopped`.
 
 SQLite tables (same names as former worksheets). Append-only research events: ChatLogs, Assessments, SkillEvents, TeacherGrades, RiskEvents. Upserts: whitelist (`email`), IdentityMap (`participant_id`), Sessions (`session_id`), Threads (`conversation_thread_id`), Settings (`key`).
 
-**whitelist:** `email`, `role`, `enabled`, `created_at`
+**whitelist:** `email`, `role`, `enabled`, `created_at`, `password_hash` (omit `password_hash` from research ZIP)
 
 **IdentityMap:** `participant_id`, `email`, `created_at`, `last_login_at`, `role`
 
@@ -133,8 +133,8 @@ Retry 3 times on 429/quota/timeout/503. Default model config: `gemini-3.8-flash`
 
 ## Auth and config
 
-- Login: enabled SQLite `whitelist` row, then OTP. No open school-domain login.
-- After OTP, set URL `sid` (random token); SQLite stores only `sha256(sid)` in `AuthSessions` for ~12h so refresh stays logged in.
+- Login: enabled SQLite `whitelist` row. First visit: OTP, then set password. Later: email + password. OTP remains for first login / reset path.
+- After password or OTP+password-setup, set URL `sid` (random token); SQLite stores only `sha256(sid)` in `AuthSessions` for ~12h so refresh stays logged in.
 - Seed: `[auth].login_allowlist` + `[auth].teacher_emails` (legacy `[app].teacher_test_emails`).
 - OTP: 6 digits, hashed `salt:sha256` in session state, default TTL 600s, resend cooldown 60s.
 - `local_demo_mode`: show OTP on screen.

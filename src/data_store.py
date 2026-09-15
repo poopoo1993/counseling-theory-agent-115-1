@@ -20,7 +20,7 @@ from .config import DEFAULT_LOGIN_ALLOWLIST, DEFAULT_SETTINGS, DEFAULT_TEACHER_E
 
 
 SCHEMAS: dict[str, list[str]] = {
-    "whitelist": ["email", "role", "enabled", "created_at"],
+    "whitelist": ["email", "role", "enabled", "created_at", "password_hash"],
     "IdentityMap": ["participant_id", "email", "created_at", "last_login_at", "role"],
     "Sessions": [
         "session_id", "conversation_thread_id", "participant_id", "agent_type", "mode",
@@ -130,6 +130,26 @@ class WhitelistMixin:
             "role": str(stored_role).strip().lower() or "student",
             "enabled": "true" if enabled else "false",
             "created_at": existing.get("created_at") or self.now(),
+            "password_hash": existing.get("password_hash", ""),
+        })
+
+    def has_login_password(self, email: str) -> bool:
+        row = self._whitelist_row(email)
+        return bool(row and str(row.get("password_hash", "")).strip())
+
+    def get_password_hash(self, email: str) -> str:
+        row = self._whitelist_row(email) or {}
+        return str(row.get("password_hash", "")).strip()
+
+    def set_password_hash(self, email: str, password_hash: str) -> None:
+        value = str(email or "").strip().lower()
+        existing = self._whitelist_row(value)
+        if not existing:
+            raise KeyError(value)
+        self._upsert_by_key("whitelist", "email", value, {
+            **existing,
+            "email": value,
+            "password_hash": str(password_hash or ""),
         })
 
     def seed_whitelist(self, login_allowlist: tuple[str, ...] = (), teacher_emails: tuple[str, ...] = ()) -> None:
@@ -151,6 +171,8 @@ class WhitelistMixin:
             if email in teachers or self._whitelist_row(email):
                 continue
             self.upsert_whitelist(email, "student", True)
+        from .auth import seed_default_account_passwords
+        seed_default_account_passwords(self)
 
     def list_whitelist(self) -> list[dict[str, Any]]:
         rows = self.all_records("whitelist")

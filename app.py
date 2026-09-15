@@ -14,14 +14,17 @@ import streamlit as st
 from src.auth import (
     BROWSER_SESSION_QUERY_KEY,
     BROWSER_SESSION_TTL_SECONDS,
+    MIN_PASSWORD_LENGTH,
     create_otp,
     hash_browser_session_token,
+    hash_password,
     is_email_allowed,
     is_teacher,
     new_browser_session_token,
     normalize_email,
     send_otp_email,
     verify_otp,
+    verify_password,
 )
 from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
 from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
@@ -96,6 +99,7 @@ def initialize_state() -> None:
         "otp_expires": 0.0,
         "otp_email": "",
         "otp_last_sent": 0.0,
+        "pending_password_email": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -229,14 +233,72 @@ def render_header(show_notice: bool = True) -> None:
         render_safety_notice()
 
 
+def complete_login(email: str) -> None:
+    role = STORE.get_whitelist_role(email) or (
+        "teacher" if account_is_teacher(email) else "student"
+    )
+    participant_id = STORE.get_or_create_participant(email, role, participant_salt())
+    token = new_browser_session_token()
+    STORE.create_login_session(
+        hash_browser_session_token(token),
+        email,
+        participant_id,
+        role,
+        BROWSER_SESSION_TTL_SECONDS,
+    )
+    st.query_params[BROWSER_SESSION_QUERY_KEY] = token
+    st.session_state.authenticated = True
+    st.session_state.email = email
+    st.session_state.participant_id = participant_id
+    st.session_state.view = "teacher" if role == "teacher" else "student"
+    st.session_state.pending_password_email = ""
+    st.rerun()
+
+
+def password_setup_page() -> None:
+    apply_theme("login")
+    render_header()
+    email = normalize_email(st.session_state.pending_password_email)
+    with st.container(border=True):
+        st.markdown('<p class="ct-kicker">設定密碼</p>', unsafe_allow_html=True)
+        st.markdown("**首次登入請設定密碼，之後即可用密碼登入。**")
+        st.caption(f"帳號：{email}")
+        password = st.text_input("新密碼", type="password")
+        confirm = st.text_input("再次輸入密碼", type="password")
+        if st.button("儲存密碼並進入", type="primary", use_container_width=True):
+            if len(password or "") < MIN_PASSWORD_LENGTH:
+                st.error(f"密碼至少 {MIN_PASSWORD_LENGTH} 個字元。")
+            elif password != confirm:
+                st.error("兩次輸入的密碼不一致。")
+            elif not is_email_allowed(email, STORE):
+                st.error("此信箱不在登入白名單中。")
+                st.session_state.pending_password_email = ""
+                st.rerun()
+            else:
+                STORE.set_password_hash(email, hash_password(password))
+                complete_login(email)
+
+
 def login_page() -> None:
     apply_theme("login")
     render_header()
     with st.container(border=True):
         st.markdown('<p class="ct-kicker">白名單登入</p>', unsafe_allow_html=True)
-        st.markdown("**請用已申請的學校 Email 收取驗證碼。**")
+        st.markdown("**已設定密碼者可直接登入；首次請先用驗證碼。**")
         st.caption("僅白名單信箱可登入。若尚未列入，請先向授課教師申請。")
         email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email))
+        password = st.text_input("密碼", type="password")
+        if st.button("使用密碼登入", type="primary", use_container_width=True):
+            if not is_email_allowed(email, STORE):
+                st.error("此信箱不在登入白名單中。請向授課教師申請。")
+            elif not STORE.has_login_password(email):
+                st.error("此帳號尚未設定密碼。請先用驗證碼登入並設定密碼。")
+            elif not verify_password(password, STORE.get_password_hash(email)):
+                st.error("密碼不正確。")
+            else:
+                complete_login(email)
+        st.divider()
+        st.markdown("**首次登入或忘記密碼：寄送驗證碼**")
         if st.button("寄送驗證碼", use_container_width=True):
             if not is_email_allowed(email, STORE):
                 st.error("此信箱不在登入白名單中。請向授課教師申請。")
@@ -256,33 +318,18 @@ def login_page() -> None:
                     st.success("驗證碼已寄出，請查看收件匣與垃圾郵件匣。")
                 except Exception as exc:
                     st.error(f"驗證碼寄送失敗：{exc}")
-        st.divider()
         otp = st.text_input("六位數驗證碼", max_chars=6, placeholder="000000")
-        if st.button("驗證並登入", type="primary", use_container_width=True):
+        if st.button("驗證並繼續", use_container_width=True):
             if email != st.session_state.otp_email:
                 st.error("目前輸入的 Email 與接收驗證碼的 Email 不同。")
             elif not is_email_allowed(email, STORE):
                 st.error("此信箱不在登入白名單中。")
             elif not verify_otp(otp, st.session_state.otp_hash, st.session_state.otp_expires):
                 st.error("驗證碼錯誤或已逾時。")
+            elif STORE.has_login_password(email):
+                complete_login(email)
             else:
-                role = STORE.get_whitelist_role(email) or (
-                    "teacher" if account_is_teacher(email) else "student"
-                )
-                participant_id = STORE.get_or_create_participant(email, role, participant_salt())
-                token = new_browser_session_token()
-                STORE.create_login_session(
-                    hash_browser_session_token(token),
-                    email,
-                    participant_id,
-                    role,
-                    BROWSER_SESSION_TTL_SECONDS,
-                )
-                st.query_params[BROWSER_SESSION_QUERY_KEY] = token
-                st.session_state.authenticated = True
-                st.session_state.email = email
-                st.session_state.participant_id = participant_id
-                st.session_state.view = "teacher" if role == "teacher" else "student"
+                st.session_state.pending_password_email = email
                 st.rerun()
 
 
@@ -965,7 +1012,12 @@ def export_research_zip() -> bytes:
             if sheet == "AuthSessions":
                 continue
             rows = STORE.all_records(sheet)
-            frame = pd.DataFrame(rows, columns=SCHEMAS[sheet])
+            if sheet == "whitelist":
+                headers = [h for h in SCHEMAS[sheet] if h != "password_hash"]
+                rows = [{key: row.get(key, "") for key in headers} for row in rows]
+            else:
+                headers = SCHEMAS[sheet]
+            frame = pd.DataFrame(rows, columns=headers)
             zf.writestr(f"{sheet}.csv", frame.to_csv(index=False).encode("utf-8-sig"))
     return output.getvalue()
 
@@ -1017,10 +1069,15 @@ def teacher_settings_panel(settings: dict[str, str]) -> None:
 def teacher_whitelist_panel() -> None:
     st.markdown('<p class="ct-kicker">帳號管理</p>', unsafe_allow_html=True)
     st.markdown("**登入白名單**")
-    st.caption("只有 enabled 的 Email 可以收取 OTP 並登入。學生無法自行註冊。")
+    st.caption("只有 enabled 的 Email 可以用密碼或 OTP 登入。學生無法自行註冊。密碼雜湊不會顯示。")
     rows = STORE.list_whitelist()
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        display = []
+        for row in rows:
+            item = {key: value for key, value in row.items() if key != "password_hash"}
+            item["已設密碼"] = "是" if str(row.get("password_hash", "")).strip() else "否"
+            display.append(item)
+        st.dataframe(pd.DataFrame(display), use_container_width=True, hide_index=True)
     else:
         with st.container(border=True):
             render_empty_state("白名單尚無資料", "請新增學生 Email，或在 Secrets 的 teacher_emails／login_allowlist 種子帳號。")
@@ -1158,7 +1215,9 @@ def teacher_dashboard() -> None:
 
 
 restore_browser_session()
-if not st.session_state.authenticated:
+if st.session_state.pending_password_email and not st.session_state.authenticated:
+    password_setup_page()
+elif not st.session_state.authenticated:
     login_page()
 else:
     sidebar()

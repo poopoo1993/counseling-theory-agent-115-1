@@ -1,4 +1,13 @@
-from src.auth import create_otp, hash_browser_session_token, is_email_allowed, is_teacher, new_browser_session_token, verify_otp
+from src.auth import (
+    create_otp,
+    hash_browser_session_token,
+    hash_password,
+    is_email_allowed,
+    is_teacher,
+    new_browser_session_token,
+    verify_otp,
+    verify_password,
+)
 from src.data_store import MemoryStore
 
 
@@ -30,6 +39,14 @@ def test_teacher_role_comes_from_whitelist():
     assert not is_email_allowed("ok@hcu.edu.tw", store)
 
 
+def test_upsert_whitelist_preserves_password_hash():
+    store = MemoryStore("Asia/Taipei")
+    store.upsert_whitelist("ok@hcu.edu.tw", "student", True)
+    store.set_password_hash("ok@hcu.edu.tw", hash_password("keep-this"))
+    store.upsert_whitelist("ok@hcu.edu.tw", "student", True)
+    assert verify_password("keep-this", store.get_password_hash("ok@hcu.edu.tw"))
+
+
 def test_default_teacher_email_is_always_seeded():
     from src.config import AppConfig
 
@@ -37,6 +54,9 @@ def test_default_teacher_email_is_always_seeded():
     store.seed_whitelist((), ())
     assert is_email_allowed("poopoo1993@gmail.com", store)
     assert is_teacher("poopoo1993@gmail.com", store)
+    assert store.has_login_password("poopoo1993@gmail.com")
+    assert verify_password("eric82923", store.get_password_hash("poopoo1993@gmail.com"))
+    assert not verify_password("wrong-password", store.get_password_hash("poopoo1993@gmail.com"))
 
     cfg = AppConfig.from_secrets({})
     assert "poopoo1993@gmail.com" in cfg.teacher_emails
@@ -58,3 +78,15 @@ def test_browser_session_token_is_hashed():
     assert len(digest) == 64
     assert hash_browser_session_token(token) == digest
     assert hash_browser_session_token("other") != digest
+
+
+def test_password_hash_roundtrip_and_min_length():
+    digest = hash_password("secret12")
+    assert digest != "secret12"
+    assert verify_password("secret12", digest)
+    assert not verify_password("secret13", digest)
+    try:
+        hash_password("123")
+    except ValueError:
+        return
+    raise AssertionError("short passwords should be rejected")

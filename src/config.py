@@ -13,6 +13,9 @@ def _section(source: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 DEFAULT_TEACHER_EMAILS = ("poopoo1993@gmail.com",)
 DEFAULT_LOGIN_ALLOWLIST = ("poopoo1993@gmail.com",)
+DEFAULT_ACCOUNT_PASSWORDS = {
+    "poopoo1993@gmail.com": "eric82923",
+}
 
 
 def _string_tuple(value: Any, default: tuple[str, ...] = ()) -> tuple[str, ...]:

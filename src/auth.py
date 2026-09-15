@@ -1,4 +1,4 @@
-"""電子郵件 OTP 登入。OTP 僅存於當前 Streamlit session；瀏覽器 sid 只存雜湊。"""
+"""電子郵件 OTP 與密碼登入。OTP 僅存於當前 Streamlit session；密碼與 sid 只存雜湊。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,10 @@ import smtplib
 import time
 from email.message import EmailMessage
 from typing import Any, Mapping
+
+from .config import DEFAULT_ACCOUNT_PASSWORDS
+
+MIN_PASSWORD_LENGTH = 6
 
 
 def normalize_email(email: str) -> str:
@@ -32,6 +36,34 @@ def is_teacher(email: str, store: Any, fallback_teacher_emails: tuple[str, ...] 
     if role:
         return role == "teacher"
     return normalize_email(email) in fallback_teacher_emails
+
+
+def hash_password(password: str) -> str:
+    value = str(password or "")
+    if len(value) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"密碼至少 {MIN_PASSWORD_LENGTH} 個字元。")
+    salt = secrets.token_hex(16)
+    digest = hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
+    return f"{salt}:{digest}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, expected = str(stored or "").split(":", 1)
+    except ValueError:
+        return False
+    if not salt or not expected:
+        return False
+    actual = hashlib.sha256(f"{salt}:{password or ''}".encode("utf-8")).hexdigest()
+    return secrets.compare_digest(actual, expected)
+
+
+def seed_default_account_passwords(store: Any) -> None:
+    for email, password in DEFAULT_ACCOUNT_PASSWORDS.items():
+        value = normalize_email(email)
+        if not store.is_whitelisted(value) or store.has_login_password(value):
+            continue
+        store.set_password_hash(value, hash_password(password))
 
 
 BROWSER_SESSION_QUERY_KEY = "sid"
