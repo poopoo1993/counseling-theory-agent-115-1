@@ -595,6 +595,52 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   margin-bottom: 0;
 }
 
+.ct-coach-empty {
+  color: var(--ct-muted);
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+.ct-thoughts {
+  margin-top: 0.95rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--ct-line);
+}
+
+.ct-thoughts .ct-kicker {
+  margin-bottom: 0.35rem;
+}
+
+.ct-thought-log {
+  max-height: 12.5rem;
+  overflow-y: auto;
+  margin-bottom: 0.55rem;
+}
+
+.ct-thought-item {
+  margin: 0 0 0.45rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 10px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.ct-thought-item span {
+  display: block;
+  color: var(--ct-muted);
+  font-size: 0.72rem;
+  margin-bottom: 0.15rem;
+}
+
+.ct-thought-item.student {
+  background: var(--ct-sage-soft);
+}
+
+.ct-thought-item.coach {
+  background: #f4f1eb;
+  border: 1px solid var(--ct-line);
+}
+
 @media (max-width: 800px) {
   .ct-role-grid,
   .ct-meta-grid {
@@ -834,6 +880,25 @@ def render_coaching_panel(
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_thought_log(notes: Sequence[Mapping[str, Any]]) -> None:
+    st = _st()
+    if not notes:
+        st.markdown(
+            '<p class="ct-coach-empty">寫下你此刻的想法或判斷，這裡會給簡短回應。這段不會進入模擬逐字稿。</p>',
+            unsafe_allow_html=True,
+        )
+        return
+    items: list[str] = []
+    for note in notes[-8:]:
+        kind = "student" if str(note.get("role", "")) == "student" else "coach"
+        label = "你的想法" if kind == "student" else "回應"
+        items.append(
+            f'<div class="ct-thought-item {kind}"><span>{label}</span>'
+            f"{escape_html(note.get('content', ''))}</div>"
+        )
+    st.markdown(f'<div class="ct-thought-log">{"".join(items)}</div>', unsafe_allow_html=True)
 
 
 def render_meta_grid(items: Sequence[tuple[str, str]]) -> None:

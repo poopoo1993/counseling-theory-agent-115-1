@@ -11,6 +11,7 @@ from .prompts import (
     build_chat_analysis_prompt,
     build_counseling_plan_prompt,
     build_dialogue_prompt,
+    build_thought_coach_prompt,
 )
 
 
@@ -117,3 +118,33 @@ def generate_chat_reply(
     )
     latency = int((time.perf_counter() - started) * 1000)
     return response, latency
+
+
+def generate_thought_coach_reply(
+    service: GeminiService,
+    *,
+    mode: str,
+    school_id: str,
+    selected_ids: list[str],
+    turns: list[dict[str, Any]],
+    student_guide: str,
+    example_replies: list[str],
+    prior_notes: list[dict[str, Any]],
+    latest_thought: str,
+) -> str:
+    system, prompt = build_thought_coach_prompt(
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        turns=turns,
+        student_guide=student_guide,
+        example_replies=example_replies,
+        prior_notes=prior_notes,
+        latest_thought=latest_thought,
+    )
+    return service.generate_text(
+        prompt,
+        system_instruction=system,
+        temperature=0.35,
+        max_output_tokens=450,
+    )

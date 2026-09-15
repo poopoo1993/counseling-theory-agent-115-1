@@ -5,6 +5,7 @@ from src.prompts import (
     build_dialogue_prompt,
     build_knowledge_block,
     build_practice_evaluator_prompt,
+    build_thought_coach_prompt,
     live_coaching_enabled,
     live_plan_visible,
     turn_review_visible,
@@ -138,6 +139,27 @@ def test_analysis_for_chatbot_strips_student_visible_fields():
     assert "student_guide" not in hidden
     assert "example_replies" not in hidden
     assert "turn_review" not in hidden
+
+
+def test_thought_coach_prompt_stays_out_of_simulation_roles():
+    system, prompt = build_thought_coach_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED,
+        turns=[], student_guide="先反映情緒", example_replies=["你聽起來很累。"],
+        prior_notes=[], latest_thought="我覺得該問證據了。",
+    )
+    assert "教學督導" in system
+    assert "不得扮演模擬個案" in system
+    assert "不要打分數" in system
+    assert "我覺得該問證據了。" in prompt
+    system_ex, prompt_ex = build_thought_coach_prompt(
+        mode="experience", school_id="cbt", selected_ids=SELECTED,
+        turns=[], student_guide="建立關係", example_replies=[],
+        prior_notes=[{"role": "student", "content": "他好像在繞圈子"}],
+        latest_thought="這是不是同理？",
+    )
+    assert "不得評分學生的個案表現" in system_ex
+    assert "這是不是同理？" in prompt_ex
+    assert "模擬逐字稿" in prompt_ex
 
 
 def test_evaluator_distinguishes_missed_and_no_opportunity():

@@ -30,7 +30,7 @@ from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
 from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
 from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
-from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply
+from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply, generate_thought_coach_reply
 from src.prompts import (
     build_experience_analysis_prompt,
     build_practice_evaluator_prompt,
@@ -58,6 +58,7 @@ from src.ui import (
     render_role_callout,
     render_safety_notice,
     render_technique_cards,
+    render_thought_log,
     render_transcript,
     render_user_card,
 )
@@ -95,6 +96,7 @@ def initialize_state() -> None:
         "counseling_plan": None,
         "chat_analysis": None,
         "turn_reviews": [],
+        "coach_thoughts": [],
         "continuation_snapshot": None,
         "prior_turns_context": [],
         "assessment": None,
@@ -595,6 +597,7 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
     st.session_state.counseling_plan = plan
     st.session_state.chat_analysis = None
     st.session_state.turn_reviews = []
+    st.session_state.coach_thoughts = []
     st.session_state.continuation_snapshot = None
     st.session_state.prior_turns_context = []
     st.session_state.assessment = None
@@ -629,6 +632,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     st.session_state.counseling_plan = parse_json_cell(thread.get("counseling_plan"), {})
     st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
     st.session_state.turn_reviews = []
+    st.session_state.coach_thoughts = []
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
     st.session_state.assessment = None
@@ -777,6 +781,78 @@ def continuation_panel() -> None:
             st.error(f"無法開始續談：{exc}")
 
 
+def stop_simulation_for_risk(session: dict[str, Any], prompt: str) -> None:
+    message = safety_message()
+    store_turn(new_turn(
+        session=session,
+        turn_index=len(st.session_state.turns) + 1,
+        speaker_role="system",
+        content=message,
+        timezone=CONFIG.timezone,
+        error_flag="immediate_risk_stop",
+    ))
+    STORE.append("RiskEvents", {
+        "risk_event_id": str(uuid.uuid4()),
+        "session_id": session["session_id"],
+        "participant_id": session["participant_id"],
+        "timestamp": STORE.now(),
+        "event_type": "immediate_risk_language",
+        "action_taken": "simulation_stopped_and_human_help_displayed",
+        "content_redacted": redact_for_preview(prompt),
+    })
+    st.session_state.active_session = finish_session(session, CONFIG.timezone, "safety_stopped")
+    STORE.finish_session(st.session_state.active_session)
+
+
+def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> None:
+    notes = list(st.session_state.get("coach_thoughts") or [])
+    st.markdown('<div class="ct-thoughts"><p class="ct-kicker">當下的想法與判斷</p></div>', unsafe_allow_html=True)
+    render_thought_log(notes)
+    with st.form("coach_thought_form", clear_on_submit=True):
+        thought = st.text_area(
+            "想法輸入",
+            height=90,
+            max_chars=min(400, CONFIG.max_input_chars),
+            placeholder="例如：我覺得現在該反映情緒，但怕問太快。",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("送出想法", use_container_width=True)
+    if not submitted:
+        return
+    text = str(thought or "").strip()
+    if not text:
+        return
+    if detect_pii(text):
+        st.error("內容疑似包含 Email、電話或身分證格式。請刪除可識別資訊後再送出。")
+        return
+    if detect_immediate_risk(text):
+        stop_simulation_for_risk(session, text)
+        st.rerun()
+        return
+    notes.append({"role": "student", "content": text})
+    examples = analysis.get("example_replies")
+    if not isinstance(examples, list):
+        examples = []
+    try:
+        with st.spinner("正在回應你的想法…"):
+            reply = generate_thought_coach_reply(
+                gemini(),
+                mode=session["mode"],
+                school_id=session["school_id"],
+                selected_ids=session["selected_techniques"],
+                turns=st.session_state.prior_turns_context + st.session_state.turns,
+                student_guide=str(analysis.get("student_guide", "")),
+                example_replies=[str(item) for item in examples],
+                prior_notes=notes,
+                latest_thought=text,
+            )
+        notes.append({"role": "coach", "content": reply})
+    except Exception as exc:
+        notes.append({"role": "coach", "content": f"暫時無法回應這個想法：{exc}"})
+    st.session_state.coach_thoughts = notes
+    st.rerun()
+
+
 def render_chat() -> None:
     session = st.session_state.active_session
     settings = settings_with_defaults()
@@ -846,6 +922,7 @@ def render_chat() -> None:
                 guide=str(analysis.get("student_guide", "")),
                 examples=examples,
             )
+            render_thought_coach(session, analysis)
     else:
         render_dialog()
         prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
@@ -865,27 +942,9 @@ def render_chat() -> None:
     )
     store_turn(student_turn)
     if detect_immediate_risk(prompt):
-        message = safety_message()
-        store_turn(new_turn(
-            session=session,
-            turn_index=len(st.session_state.turns) + 1,
-            speaker_role="system",
-            content=message,
-            timezone=CONFIG.timezone,
-            error_flag="immediate_risk_stop",
-        ))
-        STORE.append("RiskEvents", {
-            "risk_event_id": str(uuid.uuid4()),
-            "session_id": session["session_id"],
-            "participant_id": session["participant_id"],
-            "timestamp": STORE.now(),
-            "event_type": "immediate_risk_language",
-            "action_taken": "simulation_stopped_and_human_help_displayed",
-            "content_redacted": redact_for_preview(prompt),
-        })
-        st.session_state.active_session = finish_session(session, CONFIG.timezone, "safety_stopped")
-        STORE.finish_session(st.session_state.active_session)
+        stop_simulation_for_risk(session, prompt)
         st.rerun()
+        return
     try:
         with st.spinner("正在分析對話並回應…"):
             generate_ai_turn(is_opening=False, latest_student_message=prompt)
@@ -1062,6 +1121,7 @@ def render_feedback(settings: dict[str, str]) -> None:
             st.session_state.counseling_plan = None
             st.session_state.chat_analysis = None
             st.session_state.turn_reviews = []
+            st.session_state.coach_thoughts = []
             st.session_state.continuation_snapshot = None
             st.session_state.prior_turns_context = []
             st.session_state.assessment = None

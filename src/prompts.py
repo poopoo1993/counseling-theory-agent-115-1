@@ -424,3 +424,47 @@ def build_snapshot_prompt(
   "next_session_focus": ["可自然接續的焦點"],
   "ai_role_consistency": "下次需維持的同一位 AI 個案或諮商師特徵"
 }}"""
+
+
+def build_thought_coach_prompt(
+    *,
+    mode: str,
+    school_id: str,
+    selected_ids: list[str],
+    turns: list[dict[str, Any]],
+    student_guide: str,
+    example_replies: list[str],
+    prior_notes: list[dict[str, Any]],
+    latest_thought: str,
+) -> tuple[str, str]:
+    knowledge = build_knowledge_block(school_id, selected_ids)
+    history = transcript_text(turns[-8:]) or "（尚無模擬對話）"
+    notes = "\n".join(
+        f"{'學生' if item.get('role') == 'student' else '回應'}：{item.get('content', '')}"
+        for item in (prior_notes or [])[-6:]
+    ) or "（尚無先前想法）"
+    examples = "\n".join(f"- {item}" for item in example_replies if str(item).strip()) or "（尚無例句）"
+    if mode == "practice":
+        system = COMMON_SYSTEM + """
+你是初階實作的教學督導，只回應學生對此刻晤談的想法與判斷。可以點名本次指定技巧、肯定合宜判斷、溫和校正偏離。
+不得扮演模擬個案，不得把這段話當成晤談對話，不得要求真實個資，不要打分數。每次回覆 2 至 5 句。"""
+        role_note = "模式：practice（學生當諮商師）。針對其臨床想法作答。"
+    else:
+        system = COMMON_SYSTEM + """
+你是初階體驗的教學解說者，只回應學生對示範晤談的觀察與想法。可以說明此刻做法為何、可能效果為何。
+不得評分學生的個案表現，不得扮演模擬諮商師把這段話當成晤談對話，不得要求真實個資。每次回覆 2 至 5 句。"""
+        role_note = "模式：experience（學生當個案）。針對其觀察與理解作答，不評分個案表現。"
+    prompt = f"""請回覆學生此刻寫下的想法與判斷。
+{role_note}
+知識庫：
+{knowledge}
+旁欄計畫：{student_guide or "（尚無）"}
+旁欄例句：
+{examples}
+模擬逐字稿（僅供對照，不要延續其角色說話）：
+{history}
+先前想法對話：
+{notes}
+學生此刻想法：{latest_thought}
+"""
+    return system, prompt

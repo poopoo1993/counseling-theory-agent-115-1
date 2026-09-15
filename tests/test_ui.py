@@ -19,3 +19,10 @@ def test_role_labels_cover_session_speakers() -> None:
         "ai_counselor",
         "system",
     }
+
+
+def test_thought_log_styles_exist() -> None:
+    from src.ui import APP_CSS
+
+    assert ".ct-thought-log" in APP_CSS
+    assert ".ct-thought-item.student" in APP_CSS
