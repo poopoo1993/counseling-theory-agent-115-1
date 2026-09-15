@@ -13,6 +13,7 @@ def _section(source: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 DEFAULT_TEACHER_EMAILS = ("poopoo1993@gmail.com",)
 DEFAULT_LOGIN_ALLOWLIST = ("poopoo1993@gmail.com",)
+DEFAULT_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash")
 DEFAULT_ACCOUNT_PASSWORDS = {
     "poopoo1993@gmail.com": "eric82923",
 }
@@ -41,6 +42,7 @@ class AppConfig:
     app_title: str
     timezone: str
     model_name: str
+    fallback_models: tuple[str, ...]
     prompt_version: str
     rubric_version: str
     allowed_domains: tuple[str, ...]
@@ -71,6 +73,7 @@ class AppConfig:
             app_title=str(app.get("title", "諮商理論技巧訓練 Agent")),
             timezone=str(app.get("timezone", "Asia/Taipei")),
             model_name=str(app.get("model_name", "gemini-3.8-flash")),
+            fallback_models=_string_tuple(app.get("fallback_models"), DEFAULT_FALLBACK_MODELS),
             prompt_version=str(app.get("prompt_version", "theory-dialogue-v1.2")),
             rubric_version=str(app.get("rubric_version", "theory-rubric-v1.0")),
             allowed_domains=allowed_domains,

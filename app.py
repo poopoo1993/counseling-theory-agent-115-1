@@ -427,10 +427,15 @@ def api_key_gate() -> GeminiService | None:
         if tested:
             try:
                 with st.spinner("正在測試連線…"):
-                    service = GeminiService(key, CONFIG.model_name)
+                    service = GeminiService(
+                        key,
+                        CONFIG.model_name,
+                        fallback_models=CONFIG.fallback_models,
+                    )
                     service.validate_key()
                 st.session_state.api_key = key.strip()
                 st.session_state.api_validated = True
+                st.session_state.active_model_name = service.model_name
                 st.success("API Key 已驗證，可以開始練習。")
                 st.rerun()
             except Exception as exc:
@@ -439,8 +444,17 @@ def api_key_gate() -> GeminiService | None:
     return None
 
 
+def _remember_model(name: str) -> None:
+    st.session_state.active_model_name = name
+
+
 def gemini() -> GeminiService:
-    return GeminiService(st.session_state.api_key, CONFIG.model_name)
+    return GeminiService(
+        st.session_state.api_key,
+        str(st.session_state.get("active_model_name") or CONFIG.model_name),
+        fallback_models=CONFIG.fallback_models,
+        on_model_used=_remember_model,
+    )
 
 
 def store_turn(turn: dict[str, Any]) -> None:
@@ -521,8 +535,9 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
 
 def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
     validate_selected_techniques(school_id, selected_ids)
+    service = gemini()
     plan = create_counseling_plan(
-        gemini(),
+        service,
         mode=mode,
         school_id=school_id,
         selected_ids=selected_ids,
@@ -536,7 +551,7 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
         mode=mode,
         school_id=school_id,
         selected_ids=selected_ids,
-        model_name=CONFIG.model_name,
+        model_name=service.model_name,
         prompt_version=CONFIG.prompt_version,
         timezone=CONFIG.timezone,
         theme=theme,
@@ -563,12 +578,13 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     validate_selected_techniques(school_id, selected_ids)
     prior_difficulty = str(thread.get("difficulty") or "").strip()
     difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
+    service = gemini()
     session = new_session(
         participant_id=st.session_state.participant_id,
         mode=mode,
         school_id=school_id,
         selected_ids=selected_ids,
-        model_name=CONFIG.model_name,
+        model_name=service.model_name,
         prompt_version=CONFIG.prompt_version,
         timezone=CONFIG.timezone,
         theme="續談上次議題",
@@ -586,7 +602,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
     st.session_state.assessment = None
     st.session_state.counseling_plan = create_counseling_plan(
-        gemini(),
+        service,
         mode=mode,
         school_id=school_id,
         selected_ids=selected_ids,
@@ -596,6 +612,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
         prior_plan=st.session_state.counseling_plan,
         prior_analysis=st.session_state.chat_analysis,
     )
+    session["model_name"] = service.model_name
     if mode == "practice":
         st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
     STORE.start_session(session)

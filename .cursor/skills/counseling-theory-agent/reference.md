@@ -129,7 +129,7 @@ Thread stores last **6** turns as `recent_turns`. Dialogue prompt also receives 
 | Snapshot | 0.1 | 1600 | yes |
 | API key test | 0.0 | 256 | no |
 
-Retry 3 times on 429/quota/timeout/503. Default model config: `gemini-3.8-flash`.
+Retry 3 times on 429/quota/timeout/503/UNAVAILABLE, then fall back to `fallback_models` (default `gemini-2.5-flash`, `gemini-2.0-flash`). Default model config: `gemini-3.8-flash`.
 
 ## Auth and config
 
