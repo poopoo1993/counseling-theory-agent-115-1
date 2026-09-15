@@ -182,7 +182,7 @@ def login_page() -> None:
         st.markdown('<p class="ct-kicker">白名單登入</p>', unsafe_allow_html=True)
         st.markdown("**請用已申請的學校 Email 收取驗證碼。**")
         st.caption("僅白名單信箱可登入。若尚未列入，請先向授課教師申請。")
-        email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email, placeholder="name@hcu.edu.tw"))
+        email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email))
         if st.button("寄送驗證碼", use_container_width=True):
             if not is_email_allowed(email, STORE):
                 st.error("此信箱不在登入白名單中。請向授課教師申請。")
@@ -961,7 +961,7 @@ def teacher_whitelist_panel() -> None:
     with st.form("add_whitelist"):
         email_col, role_col = st.columns([2.4, 1], gap="small", vertical_alignment="bottom")
         with email_col:
-            new_email = st.text_input("新增 Email", placeholder="student@hcu.edu.tw")
+            new_email = st.text_input("新增 Email")
         with role_col:
             new_role = st.selectbox("角色", ["student", "teacher"], format_func=lambda x: "學生" if x == "student" else "教師")
         if st.form_submit_button("加入白名單", type="primary", use_container_width=True):
