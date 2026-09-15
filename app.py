@@ -21,14 +21,35 @@ from src.prompts import (
     build_practice_evaluator_prompt,
     build_snapshot_prompt,
     case_data_from_plan,
+    live_coaching_enabled,
 )
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
 from src.session_service import finish_session, new_session, new_turn
 from src.theory_library import PRACTICE_THEMES, SCHOOLS, get_school, get_techniques, validate_selected_techniques
 from src.transcript import make_transcript_txt, safe_filename
+from src.ui import (
+    ROLE_LABELS,
+    apply_theme,
+    mode_label,
+    render_chips,
+    render_coaching_panel,
+    render_empty_state,
+    render_masthead,
+    render_meta_grid,
+    render_quote,
+    render_role_callout,
+    render_safety_notice,
+    render_technique_cards,
+    render_transcript,
+    render_user_card,
+)
 
-
-st.set_page_config(page_title="諮商理論技巧訓練 Agent", page_icon="🧭", layout="wide")
+st.set_page_config(
+    page_title="諮商理論技巧訓練 Agent",
+    page_icon="🧭",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
 def secrets_dict() -> dict[str, Any]:
@@ -55,6 +76,7 @@ def initialize_state() -> None:
         "case_data": None,
         "counseling_plan": None,
         "chat_analysis": None,
+        "turn_reviews": [],
         "continuation_snapshot": None,
         "prior_turns_context": [],
         "assessment": None,
@@ -134,6 +156,7 @@ def persist_thread_state(status: str = "in_progress") -> None:
         "latest_snapshot": st.session_state.continuation_snapshot or {},
         "last_session_id": session["session_id"],
         "recent_turns": (st.session_state.prior_turns_context + st.session_state.turns)[-6:],
+        "difficulty": session.get("difficulty", ""),
         "updated_at": STORE.now(),
         "status": status,
     })
@@ -146,23 +169,20 @@ def logout() -> None:
     st.rerun()
 
 
-def render_header() -> None:
-    st.title(CONFIG.app_title)
-    st.caption("11 學派 × 體驗與實作 × 跨次續談 × 形成性回饋")
-    st.warning(
-        "本系統僅供教學演練，不提供心理治療、診斷、臨床決策或緊急危機服務。"
-        "請勿輸入真實個案姓名、電話、地址、學校或機構等可識別資訊。",
-        icon="⚠️",
-    )
+def render_header(show_notice: bool = True) -> None:
+    render_masthead(CONFIG.app_title, "11 學派 · 體驗與實作 · 跨次續談 · 形成性回饋")
+    if show_notice:
+        render_safety_notice()
 
 
 def login_page() -> None:
+    apply_theme("login")
     render_header()
-    st.subheader("登入")
-    st.write("僅白名單 Email 可登入。請向授課教師申請後，再用該信箱收取驗證碼。")
-    email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email))
-    col1, col2 = st.columns(2)
-    with col1:
+    with st.container(border=True):
+        st.markdown('<p class="ct-kicker">白名單登入</p>', unsafe_allow_html=True)
+        st.markdown("**請用已申請的學校 Email 收取驗證碼。**")
+        st.caption("僅白名單信箱可登入。若尚未列入，請先向授課教師申請。")
+        email = normalize_email(st.text_input("登入 Email", value=st.session_state.otp_email, placeholder="name@hcu.edu.tw"))
         if st.button("寄送驗證碼", use_container_width=True):
             if not is_email_allowed(email, STORE):
                 st.error("此信箱不在登入白名單中。請向授課教師申請。")
@@ -182,9 +202,9 @@ def login_page() -> None:
                     st.success("驗證碼已寄出，請查看收件匣與垃圾郵件匣。")
                 except Exception as exc:
                     st.error(f"驗證碼寄送失敗：{exc}")
-    with col2:
-        otp = st.text_input("六位數驗證碼", max_chars=6)
-        if st.button("驗證並登入", use_container_width=True):
+        st.divider()
+        otp = st.text_input("六位數驗證碼", max_chars=6, placeholder="000000")
+        if st.button("驗證並登入", type="primary", use_container_width=True):
             if email != st.session_state.otp_email:
                 st.error("目前輸入的 Email 與接收驗證碼的 Email 不同。")
             elif not is_email_allowed(email, STORE):
@@ -205,17 +225,19 @@ def login_page() -> None:
 
 def sidebar() -> None:
     with st.sidebar:
-        st.markdown(f"**已登入：** {st.session_state.email}")
-        st.caption(f"教學代碼：{st.session_state.participant_id}")
+        role_label = "教師" if account_is_teacher() else "學生"
+        render_user_card(st.session_state.email, st.session_state.participant_id, role_label)
         if account_is_teacher():
             st.session_state.view = st.radio(
-                "使用介面", ["student", "teacher"],
+                "使用介面",
+                ["student", "teacher"],
                 format_func=lambda x: "學生模擬端" if x == "student" else "教師後台",
                 index=0 if st.session_state.view == "student" else 1,
             )
-        st.divider()
         st.markdown("**兩個帳號的用途**")
-        st.caption("學校信箱：登入本系統。\n\n個人 Gmail：到 Google AI Studio 申請自己的 Gemini API Key。")
+        st.caption("學校信箱：登入本系統。")
+        st.caption("個人 Gmail：到 Google AI Studio 申請自己的 Gemini API Key。")
+        st.divider()
         if st.button("登出", use_container_width=True):
             logout()
 
@@ -259,24 +281,31 @@ def student_access_error(settings: dict[str, str]) -> str | None:
 
 
 def api_key_gate() -> GeminiService | None:
-    st.subheader("連接你自己的 Gemini API Key")
-    st.write(
-        "請用個人的 `@gmail.com` 帳號到 Google AI Studio 申請 API Key，再貼到下方。"
-        "Key 僅保留於目前瀏覽器工作階段，不會寫入 SQLite、逐字稿或研究資料。"
-    )
-    key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
-    if st.button("測試 API Key"):
-        try:
-            with st.spinner("正在測試連線…"):
-                service = GeminiService(key, CONFIG.model_name)
-                service.validate_key()
-            st.session_state.api_key = key.strip()
-            st.session_state.api_validated = True
-            st.success("API Key 已驗證，可以開始練習。")
-            st.rerun()
-        except Exception as exc:
-            st.session_state.api_validated = False
-            st.error(str(exc))
+    with st.container(border=True):
+        st.markdown('<p class="ct-kicker">開始前</p>', unsafe_allow_html=True)
+        st.markdown("**連接你自己的 Gemini API Key**")
+        st.caption(
+            "請用個人的 @gmail.com 帳號到 Google AI Studio 申請 API Key。"
+            "Key 只留在目前瀏覽器工作階段，不會寫入 SQLite、逐字稿或研究資料。"
+        )
+        st.link_button("前往 Google AI Studio", "https://aistudio.google.com/", use_container_width=True)
+        key_col, action_col = st.columns([3.2, 1], gap="small", vertical_alignment="bottom")
+        with key_col:
+            key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
+        with action_col:
+            tested = st.button("測試連線", type="primary", use_container_width=True)
+        if tested:
+            try:
+                with st.spinner("正在測試連線…"):
+                    service = GeminiService(key, CONFIG.model_name)
+                    service.validate_key()
+                st.session_state.api_key = key.strip()
+                st.session_state.api_validated = True
+                st.success("API Key 已驗證，可以開始練習。")
+                st.rerun()
+            except Exception as exc:
+                st.session_state.api_validated = False
+                st.error(str(exc))
     return None
 
 
@@ -289,10 +318,29 @@ def store_turn(turn: dict[str, Any]) -> None:
     STORE.append_turn(turn)
 
 
+def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None) -> None:
+    review = (analysis or {}).get("turn_review")
+    if not isinstance(review, dict):
+        return
+    comment = str(review.get("comment", "")).strip()
+    verdict = str(review.get("verdict", "")).strip()
+    if not comment and not verdict:
+        return
+    history = list(st.session_state.get("turn_reviews") or [])
+    history = [item for item in history if int(item.get("turn_index") or 0) != student_turn_index]
+    history.append({
+        "turn_index": student_turn_index,
+        "verdict": verdict,
+        "comment": comment,
+    })
+    st.session_state.turn_reviews = history
+
+
 def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None:
     session = st.session_state.active_session
     turns = st.session_state.prior_turns_context + st.session_state.turns
-    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
+    coaching = live_coaching_enabled(session["mode"], str(session.get("difficulty", "")))
+    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context) or coaching
     if should_analyze:
         st.session_state.chat_analysis = analyze_chat(
             gemini(),
@@ -303,7 +351,18 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
             prior_analysis=st.session_state.chat_analysis,
             turns=turns,
             latest_student_message=latest_student_message,
+            difficulty=str(session.get("difficulty", "")),
         )
+        if coaching and latest_student_message:
+            student_index = next(
+                (
+                    int(turn["turn_index"])
+                    for turn in reversed(st.session_state.turns)
+                    if str(turn.get("speaker_role", "")).startswith("student")
+                ),
+                0,
+            )
+            record_turn_review(student_index, st.session_state.chat_analysis)
         persist_thread_state("in_progress")
     response, latency = generate_chat_reply(
         gemini(),
@@ -359,6 +418,7 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
     st.session_state.case_data = case_data
     st.session_state.counseling_plan = plan
     st.session_state.chat_analysis = None
+    st.session_state.turn_reviews = []
     st.session_state.continuation_snapshot = None
     st.session_state.prior_turns_context = []
     st.session_state.assessment = None
@@ -371,6 +431,8 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     mode = str(thread["mode"])
     school_id = str(thread["school_id"])
     validate_selected_techniques(school_id, selected_ids)
+    prior_difficulty = str(thread.get("difficulty") or "").strip()
+    difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
     session = new_session(
         participant_id=st.session_state.participant_id,
         mode=mode,
@@ -380,7 +442,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
         prompt_version=CONFIG.prompt_version,
         timezone=CONFIG.timezone,
         theme="續談上次議題",
-        difficulty="延續前次",
+        difficulty=difficulty,
         thread_id=str(thread["conversation_thread_id"]),
         case_id=str(thread.get("case_id", "student_topic")),
     )
@@ -389,6 +451,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
     st.session_state.counseling_plan = parse_json_cell(thread.get("counseling_plan"), {})
     st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
+    st.session_state.turn_reviews = []
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
     st.session_state.assessment = None
@@ -398,7 +461,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
         school_id=school_id,
         selected_ids=selected_ids,
         theme="續談上次議題",
-        difficulty="延續前次",
+        difficulty=difficulty,
         prior_snapshot=st.session_state.continuation_snapshot,
         prior_plan=st.session_state.counseling_plan,
         prior_analysis=st.session_state.chat_analysis,
@@ -416,11 +479,13 @@ def new_practice_panel(settings: dict[str, str]) -> None:
     if not mode_options:
         st.error("教師目前未開放任何模式。")
         return
-    mode = st.radio(
-        "選擇模式",
-        mode_options,
-        format_func=lambda x: "學派體驗：我當個案，AI 當諮商師" if x == "experience" else "學派實作：我當諮商師，AI 當個案",
-    )
+    with st.container(border=True):
+        mode = st.radio(
+            "選擇模式",
+            mode_options,
+            format_func=lambda x: "學派體驗｜我當個案，AI 當諮商師" if x == "experience" else "學派實作｜我當諮商師，AI 當個案",
+        )
+        render_role_callout(mode)
     school_ids = list(SCHOOLS)
     school_id = st.selectbox("選擇學派", school_ids, format_func=lambda x: SCHOOLS[x]["name"])
     school = get_school(school_id)
@@ -430,8 +495,7 @@ def new_practice_panel(settings: dict[str, str]) -> None:
     if mode == "experience":
         selected = list(school["experience_default"])
         st.markdown("**本次由 AI 示範的三項技巧**")
-        for item in get_techniques(school_id, selected):
-            st.write(f"- {item['name']}：{item['short']}")
+        render_technique_cards(get_techniques(school_id, selected))
     else:
         selected = st.multiselect(
             "從五項技巧中選擇恰好三項",
@@ -440,9 +504,18 @@ def new_practice_panel(settings: dict[str, str]) -> None:
             max_selections=3,
         )
         st.caption(f"已選 {len(selected)}／3 項。系統會依這三項技巧建立具有練習機會的案例。")
-    theme_id = st.selectbox("練習主題", list(PRACTICE_THEMES), format_func=lambda x: PRACTICE_THEMES[x])
-    difficulty = st.select_slider("案例難度", ["初階", "中階", "進階"], value="中階")
-    if st.button("開始新的模擬", type="primary", use_container_width=True):
+    theme_col, diff_col = st.columns(2, gap="medium")
+    with theme_col:
+        theme_id = st.selectbox("練習主題", list(PRACTICE_THEMES), format_func=lambda x: PRACTICE_THEMES[x])
+    with diff_col:
+        difficulty = st.select_slider("案例難度", ["初階", "中階", "進階"], value="中階")
+        if mode == "practice":
+            if difficulty == "初階":
+                st.caption("初階會在對話旁提供即時練習提示，並對你每一句諮商回應給簡短回饋。")
+            else:
+                st.caption("中階與進階不會在對話中提示；整體回饋在結束晤談後一次給出。")
+    ready = len(selected) == 3
+    if st.button("開始新的模擬", type="primary", use_container_width=True, disabled=not ready):
         if len(selected) != 3:
             st.error("開始前必須選擇恰好三項技巧。")
             return
@@ -452,6 +525,8 @@ def new_practice_panel(settings: dict[str, str]) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"無法開始模擬：{exc}")
+    if not ready:
+        st.caption("請先選滿三項技巧，再開始模擬。")
 
 
 def continuation_panel() -> None:
@@ -461,7 +536,8 @@ def continuation_panel() -> None:
         st.error(f"讀取續談資料失敗：{exc}")
         return
     if not threads:
-        st.info("目前沒有可續談的晤談歷程。請先完成一次模擬。")
+        with st.container(border=True):
+            render_empty_state("還沒有可續談的歷程", "請先完成一次模擬，之後就能接續同一位 AI 對話角色。")
         return
     choices = {str(t["conversation_thread_id"]): t for t in threads}
     selected_thread_id = st.selectbox(
@@ -477,25 +553,31 @@ def continuation_panel() -> None:
     school_id = str(thread["school_id"])
     school = get_school(school_id)
     default_ids = parse_json_cell(thread.get("selected_techniques"), school["experience_default"])
-    if thread.get("mode") == "experience":
-        selected = list(school["experience_default"])
-        st.write("續談會載入同一位 AI 諮商師、同一學派與前次工作焦點。")
-    else:
-        option_ids = [t["id"] for t in school["techniques"]]
-        name_map = {t["id"]: f"{t['name']}｜{t['short']}" for t in school["techniques"]}
-        valid_defaults = [x for x in default_ids if x in option_ids][:3]
-        selected = st.multiselect(
-            "本次續談要練習的三項技巧",
-            option_ids,
-            default=valid_defaults,
-            format_func=lambda x: name_map[x],
-            max_selections=3,
-        )
-        st.write("續談會載入同一位 AI 個案、已揭露內容、關係狀態與未完成議題。")
-    snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
-    if snapshot.get("unfinished_issues"):
-        st.caption("前次尚未完成：" + "；".join(snapshot["unfinished_issues"]))
-    if st.button("開始續談", type="primary", use_container_width=True):
+    with st.container(border=True):
+        render_role_callout("experience" if thread.get("mode") == "experience" else "practice")
+        if thread.get("mode") == "experience":
+            selected = list(school["experience_default"])
+            st.caption("續談會載入同一位 AI 諮商師、同一學派與前次工作焦點。")
+            render_technique_cards(get_techniques(school_id, selected))
+        else:
+            option_ids = [t["id"] for t in school["techniques"]]
+            name_map = {t["id"]: f"{t['name']}｜{t['short']}" for t in school["techniques"]}
+            valid_defaults = [x for x in default_ids if x in option_ids][:3]
+            selected = st.multiselect(
+                "本次續談要練習的三項技巧",
+                option_ids,
+                default=valid_defaults,
+                format_func=lambda x: name_map[x],
+                max_selections=3,
+            )
+            st.caption("續談會載入同一位 AI 個案、已揭露內容、關係狀態與未完成議題。")
+        snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
+        unfinished = snapshot.get("unfinished_issues") or []
+        if unfinished:
+            st.caption("前次尚未完成")
+            render_chips(unfinished)
+    ready = len(selected) == 3
+    if st.button("開始續談", type="primary", use_container_width=True, disabled=not ready):
         if len(selected) != 3:
             st.error("開始前必須選擇恰好三項技巧。")
             return
@@ -509,33 +591,50 @@ def continuation_panel() -> None:
 
 def render_chat() -> None:
     session = st.session_state.active_session
-    st.subheader(f"{session['school_name']}｜{'學派體驗' if session['mode'] == 'experience' else '學生實作'}")
-    st.caption("本次技巧：" + "／".join(session["selected_technique_names"]))
     settings = settings_with_defaults()
     target_key = "duration_experience_min" if session["mode"] == "experience" else "duration_practice_min"
     target_minutes = int(settings.get(target_key, "8" if session["mode"] == "experience" else "15") or 0)
     elapsed = datetime.now(ZoneInfo(CONFIG.timezone)) - datetime.fromisoformat(session["started_at"])
-    st.caption(f"目前約 {max(0, int(elapsed.total_seconds() // 60))} 分鐘｜建議練習 {target_minutes} 分鐘；由你自行決定何時結束，不強制跳轉。")
-    role_labels = {
-        "student_client": "你（個案）",
-        "student_counselor": "你（諮商師）",
-        "ai_client": "AI 模擬個案",
-        "ai_counselor": "AI 示範諮商師",
-        "system": "系統",
-    }
-    for turn in st.session_state.turns:
-        role = str(turn["speaker_role"])
-        with st.chat_message("user" if role.startswith("student") else "assistant"):
-            st.caption(role_labels.get(role, role))
-            st.write(turn["content_raw"])
+    elapsed_min = max(0, int(elapsed.total_seconds() // 60))
+    coaching = live_coaching_enabled(session["mode"], str(session.get("difficulty", "")))
+    analysis = st.session_state.chat_analysis or {}
+    reviews = {int(item.get("turn_index") or 0): item for item in (st.session_state.get("turn_reviews") or [])}
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
+    def render_dialog() -> None:
+        with st.container(border=True):
+            info_col, action_col = st.columns([4.2, 1.1], gap="medium", vertical_alignment="center")
+            with info_col:
+                st.markdown('<p class="ct-kicker">' + mode_label(session["mode"]) + "</p>", unsafe_allow_html=True)
+                st.markdown(f"**{session['school_name']}**")
+                render_chips(session["selected_technique_names"])
+                extra = " · 初階即時提示開啟" if coaching else ""
+                st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
+            with action_col:
+                if st.button("結束晤談", use_container_width=True):
+                    finalize_session()
+                    st.rerun()
+        for turn in st.session_state.turns:
+            role = str(turn["speaker_role"])
+            with st.chat_message("user" if role.startswith("student") else "assistant"):
+                st.caption(ROLE_LABELS.get(role, role))
+                st.write(turn["content_raw"])
+                if coaching and role == "student_counselor":
+                    review = reviews.get(int(turn.get("turn_index") or 0))
+                    if review:
+                        verdict = review.get("verdict") or "回饋"
+                        comment = review.get("comment") or ""
+                        st.caption(f"即時回饋 · {verdict}" + (f"：{comment}" if comment else ""))
         st.caption("可在括弧中輸入非語言訊息，例如（語氣放緩）、（停頓數秒）。")
-    with col2:
-        if st.button("結束本次晤談", type="primary", use_container_width=True):
-            finalize_session()
-            st.rerun()
+
+    if coaching:
+        chat_col, coach_col = st.columns([1.55, 1], gap="large")
+        with chat_col:
+            render_dialog()
+        with coach_col:
+            latest = next(iter(reversed(st.session_state.get("turn_reviews") or [])), None)
+            render_coaching_panel(analysis.get("student_guide", ""), latest)
+    else:
+        render_dialog()
 
     prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
     if not prompt:
@@ -673,81 +772,117 @@ def finalize_session() -> None:
 def render_feedback(settings: dict[str, str]) -> None:
     session = st.session_state.active_session
     assessment = st.session_state.assessment or {}
-    st.subheader("本次晤談已完成")
-    st.success("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。你之後可選擇續談同一位 AI 對話角色。")
+    with st.container(border=True):
+        st.markdown('<p class="ct-kicker">晤談完成</p>', unsafe_allow_html=True)
+        st.markdown(f"**{session['school_name']} · {mode_label(session['mode'])}**")
+        render_chips(session["selected_technique_names"])
+        st.caption("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。之後可續談同一位 AI 對話角色。")
     if as_bool(settings.get("student_feedback_visible"), True):
         if session["mode"] == "practice":
             if as_bool(settings.get("student_score_visible"), True) and assessment.get("total_score") is not None:
-                st.metric("AI 形成性分數", f"{assessment.get('total_score')} / 100")
-                st.caption("此分數供練習參考，不是標準化測驗結果，也不會覆寫教師人工成績。")
+                score_col, note_col = st.columns([1, 2.2], gap="medium", vertical_alignment="center")
+                with score_col:
+                    st.metric("AI 形成性分數", f"{assessment.get('total_score')} / 100")
+                with note_col:
+                    st.caption("此分數供練習參考，不是標準化測驗結果，也不會覆寫教師人工成績。")
             if assessment.get("encouragement"):
-                st.markdown("### 鼓勵與整體回饋")
-                st.write(assessment["encouragement"])
+                st.markdown("**鼓勵與整體回饋**")
+                render_quote(assessment["encouragement"])
             if assessment.get("strengths"):
-                st.markdown("### 具體做得好的地方")
+                st.markdown("**具體做得好的地方**")
                 for item in assessment["strengths"]:
-                    st.write(f"- {item.get('point', '')}「{item.get('evidence_quote', '')}」{item.get('effect', '')}")
+                    st.markdown(f"- {item.get('point', '')}")
+                    if item.get("evidence_quote"):
+                        render_quote(item.get("evidence_quote", ""))
+                    if item.get("effect"):
+                        st.caption(item.get("effect", ""))
             if assessment.get("improvement_points"):
-                st.markdown("### 最值得優先調整")
+                st.markdown("**最值得優先調整**")
                 for item in assessment["improvement_points"]:
-                    st.write(f"- {item.get('point', '')}：{item.get('reason', '')}")
+                    st.markdown(f"- **{item.get('point', '')}**：{item.get('reason', '')}")
             if assessment.get("alternative_responses"):
-                st.markdown("### 可嘗試的替代回應")
+                st.markdown("**可嘗試的替代回應**")
                 for item in assessment["alternative_responses"]:
-                    st.write(f"原句：「{item.get('original_quote', '')}」")
-                    st.write(f"可改為：「{item.get('better_response', '')}」— {item.get('why', '')}")
+                    with st.container(border=True):
+                        st.caption("原句")
+                        render_quote(item.get("original_quote", ""))
+                        st.caption("可改為")
+                        st.write(item.get("better_response", ""))
+                        if item.get("why"):
+                            st.caption(item.get("why", ""))
             if assessment.get("next_practice_focus"):
-                st.markdown("### 下次練習焦點")
+                st.markdown("**下次練習焦點**")
                 for item in assessment["next_practice_focus"]:
-                    st.write(f"- {item}")
+                    st.markdown(f"- {item}")
         else:
             st.info("體驗模式不評分學生的自我揭露或『個案表現』。以下只解析 AI 諮商師的示範。")
             if assessment.get("technique_explanations"):
                 for item in assessment["technique_explanations"]:
                     name = next((t["name"] for t in get_school(session["school_id"])["techniques"] if t["id"] == item.get("technique_id")), item.get("technique_id", "技巧"))
                     with st.expander(name):
-                        st.write(f"AI 原句：「{item.get('ai_quote', '')}」")
+                        if item.get("ai_quote"):
+                            st.caption("AI 原句")
+                            render_quote(item.get("ai_quote", ""))
                         st.write(f"使用理由：{item.get('why_used', '')}")
                         st.write(f"可能效果：{item.get('possible_effect', '')}")
             if assessment.get("overall_learning"):
                 st.write(assessment["overall_learning"])
             if assessment.get("encouragement"):
-                st.write(assessment["encouragement"])
+                render_quote(assessment["encouragement"])
     else:
         st.info("教師目前設定為不向學生顯示 AI 回饋；本次資料仍已保存供教師檢視。")
 
     transcript = make_transcript_txt(session, st.session_state.turns)
-    st.download_button(
-        "下載本次晤談逐字稿 TXT（選配）",
-        transcript,
-        file_name=safe_filename(session["session_id"]),
-        mime="text/plain",
-        use_container_width=True,
-    )
-    if st.button("回到練習首頁", use_container_width=True):
-        st.session_state.active_session = None
-        st.session_state.turns = []
-        st.session_state.case_data = None
-        st.session_state.counseling_plan = None
-        st.session_state.chat_analysis = None
-        st.session_state.continuation_snapshot = None
-        st.session_state.prior_turns_context = []
-        st.session_state.assessment = None
-        st.rerun()
+    action_col, home_col = st.columns(2, gap="small")
+    with action_col:
+        st.download_button(
+            "下載逐字稿 TXT",
+            transcript,
+            file_name=safe_filename(session["session_id"]),
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with home_col:
+        if st.button("回到練習首頁", type="primary", use_container_width=True):
+            st.session_state.active_session = None
+            st.session_state.turns = []
+            st.session_state.case_data = None
+            st.session_state.counseling_plan = None
+            st.session_state.chat_analysis = None
+            st.session_state.turn_reviews = []
+            st.session_state.continuation_snapshot = None
+            st.session_state.prior_turns_context = []
+            st.session_state.assessment = None
+            st.rerun()
 
 
 def student_page() -> None:
-    render_header()
     settings = settings_with_defaults()
     error = student_access_error(settings)
     if error and not account_is_teacher():
+        apply_theme("student")
+        render_header()
         st.error(error)
         return
+    in_chat = bool(
+        st.session_state.active_session
+        and st.session_state.active_session.get("completion_status") == "in_progress"
+    )
+    if in_chat:
+        session = st.session_state.active_session or {}
+        apply_theme(
+            "coach"
+            if live_coaching_enabled(session.get("mode", ""), str(session.get("difficulty", "")))
+            else "chat"
+        )
+    else:
+        apply_theme("student")
+        render_header(show_notice=not bool(st.session_state.active_session))
     if not st.session_state.api_validated or not st.session_state.api_key:
         api_key_gate()
         return
     if st.session_state.active_session:
-        if st.session_state.active_session.get("completion_status") == "in_progress":
+        if in_chat:
             render_chat()
         else:
             render_feedback(settings)
@@ -770,22 +905,26 @@ def export_research_zip() -> bytes:
 
 
 def teacher_settings_panel(settings: dict[str, str]) -> None:
-    st.subheader("教學開放設定")
+    st.markdown('<p class="ct-kicker">課程控制</p>', unsafe_allow_html=True)
+    st.markdown("**教學開放設定**")
     with st.form("teacher_settings"):
-        enabled = st.checkbox("開放學生使用", value=as_bool(settings.get("system_enabled"), True))
-        open_start = st.text_input("開放時間（ISO，可留白）", settings.get("open_start", ""), placeholder="2026-09-15T08:00:00+08:00")
-        open_end = st.text_input("關閉時間（ISO，可留白）", settings.get("open_end", ""), placeholder="2027-01-15T23:59:00+08:00")
-        max_sessions = st.number_input("每位學生最多 Session 數（0 表示不限）", min_value=0, value=int(settings.get("max_sessions_per_student", "0") or 0))
-        duration_experience = st.number_input("體驗模式建議分鐘數", min_value=1, max_value=60, value=int(settings.get("duration_experience_min", "8") or 8))
-        duration_practice = st.number_input("實作模式建議分鐘數", min_value=1, max_value=60, value=int(settings.get("duration_practice_min", "15") or 15))
-        modes = st.multiselect(
-            "開放模式", ["experience", "practice"],
-            default=[x.strip() for x in settings.get("allowed_modes", "experience,practice").split(",") if x.strip()],
-            format_func=lambda x: "學派體驗" if x == "experience" else "學生實作",
-        )
-        feedback = st.checkbox("學生可看形成性回饋", value=as_bool(settings.get("student_feedback_visible"), True))
-        score = st.checkbox("學生可看 AI 形成性分數", value=as_bool(settings.get("student_score_visible"), True))
-        if st.form_submit_button("儲存設定"):
+        left, right = st.columns(2, gap="large")
+        with left:
+            enabled = st.checkbox("開放學生使用", value=as_bool(settings.get("system_enabled"), True))
+            modes = st.multiselect(
+                "開放模式", ["experience", "practice"],
+                default=[x.strip() for x in settings.get("allowed_modes", "experience,practice").split(",") if x.strip()],
+                format_func=lambda x: "學派體驗" if x == "experience" else "學生實作",
+            )
+            feedback = st.checkbox("學生可看形成性回饋", value=as_bool(settings.get("student_feedback_visible"), True))
+            score = st.checkbox("學生可看 AI 形成性分數", value=as_bool(settings.get("student_score_visible"), True))
+        with right:
+            open_start = st.text_input("開放時間（ISO，可留白）", settings.get("open_start", ""), placeholder="2026-09-15T08:00:00+08:00")
+            open_end = st.text_input("關閉時間（ISO，可留白）", settings.get("open_end", ""), placeholder="2027-01-15T23:59:00+08:00")
+            max_sessions = st.number_input("每位學生最多 Session 數（0 表示不限）", min_value=0, value=int(settings.get("max_sessions_per_student", "0") or 0))
+            duration_experience = st.number_input("體驗模式建議分鐘數", min_value=1, max_value=60, value=int(settings.get("duration_experience_min", "8") or 8))
+            duration_practice = st.number_input("實作模式建議分鐘數", min_value=1, max_value=60, value=int(settings.get("duration_practice_min", "15") or 15))
+        if st.form_submit_button("儲存設定", type="primary", use_container_width=True):
             updates = {
                 "system_enabled": str(enabled).lower(),
                 "open_start": open_start.strip(),
@@ -810,17 +949,22 @@ def teacher_settings_panel(settings: dict[str, str]) -> None:
 
 
 def teacher_whitelist_panel() -> None:
-    st.subheader("登入白名單")
+    st.markdown('<p class="ct-kicker">帳號管理</p>', unsafe_allow_html=True)
+    st.markdown("**登入白名單**")
     st.caption("只有 enabled 的 Email 可以收取 OTP 並登入。學生無法自行註冊。")
     rows = STORE.list_whitelist()
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.info("白名單尚無資料。請新增學生 Email，或在 Secrets 的 teacher_emails／login_allowlist 種子帳號。")
+        with st.container(border=True):
+            render_empty_state("白名單尚無資料", "請新增學生 Email，或在 Secrets 的 teacher_emails／login_allowlist 種子帳號。")
     with st.form("add_whitelist"):
-        new_email = st.text_input("新增 Email")
-        new_role = st.selectbox("角色", ["student", "teacher"], format_func=lambda x: "學生" if x == "student" else "教師")
-        if st.form_submit_button("加入白名單"):
+        email_col, role_col = st.columns([2.4, 1], gap="small", vertical_alignment="bottom")
+        with email_col:
+            new_email = st.text_input("新增 Email", placeholder="student@hcu.edu.tw")
+        with role_col:
+            new_role = st.selectbox("角色", ["student", "teacher"], format_func=lambda x: "學生" if x == "student" else "教師")
+        if st.form_submit_button("加入白名單", type="primary", use_container_width=True):
             value = normalize_email(new_email)
             if "@" not in value:
                 st.error("請輸入有效 Email。")
@@ -833,7 +977,7 @@ def teacher_whitelist_panel() -> None:
             "停用或重新啟用",
             [str(r.get("email", "")) for r in rows],
         )
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2, gap="small")
         role = next((str(r.get("role", "student")) for r in rows if r.get("email") == target), "student")
         with col1:
             if st.button("停用此 Email", use_container_width=True):
@@ -845,8 +989,16 @@ def teacher_whitelist_panel() -> None:
                 st.rerun()
 
 
+def _school_display_name(school_id: str) -> str:
+    try:
+        return get_school(str(school_id))["name"]
+    except Exception:
+        return str(school_id or "")
+
+
 def teacher_dashboard() -> None:
-    render_header()
+    apply_theme("teacher")
+    render_header(show_notice=True)
     if not account_is_teacher():
         st.error("此帳號沒有教師後台權限。")
         return
@@ -856,13 +1008,14 @@ def teacher_dashboard() -> None:
         sessions = STORE.all_records("Sessions")
         identities = STORE.all_records("IdentityMap")
         if not sessions:
-            st.info("目前尚無 Session 資料。")
+            with st.container(border=True):
+                render_empty_state("目前尚無 Session 資料", "學生完成模擬後，進度與逐字稿會顯示在這裡。")
         else:
             sdf = pd.DataFrame(sessions)
             idf = pd.DataFrame(identities)[["participant_id", "email"]] if identities else pd.DataFrame(columns=["participant_id", "email"])
             merged = sdf.merge(idf, on="participant_id", how="left")
             completed = merged[merged["completion_status"].isin(["completed", "safety_stopped"])]
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3 = st.columns(3, gap="medium")
             c1.metric("學生人數", int(merged["participant_id"].nunique()))
             c2.metric("Session 數", len(merged))
             durations = pd.to_numeric(merged.get("duration_seconds", pd.Series(dtype=float)), errors="coerce").fillna(0)
@@ -876,31 +1029,38 @@ def teacher_dashboard() -> None:
                 session_ids = list(shown["session_id"].astype(str))
                 chosen = st.selectbox("查看單次 Session", session_ids, format_func=lambda x: f"{x[:8]}…")
                 row = shown[shown["session_id"].astype(str) == chosen].iloc[0].to_dict()
-                st.markdown(f"**學生：** {row.get('email', '')}　 **學派：** {row.get('school_id', '')}　 **模式：** {row.get('mode', '')}")
+                render_meta_grid([
+                    ("學生", str(row.get("email", ""))),
+                    ("學派", _school_display_name(str(row.get("school_id", "")))),
+                    ("模式", mode_label(str(row.get("mode", "")))),
+                ])
                 turns = STORE.session_turns(chosen)
-                for turn in turns:
-                    st.write(f"**[{turn.get('turn_index')}] {turn.get('speaker_role')}：** {turn.get('content_raw')}")
+                st.markdown("**逐字稿**")
+                render_transcript(turns)
                 thread_id = str(row.get("conversation_thread_id", ""))
                 thread = next(
                     (t for t in STORE.all_records("Threads") if str(t.get("conversation_thread_id")) == thread_id),
                     None,
                 )
                 if thread:
-                    st.markdown("### 內部諮商計畫（學生不可見）")
-                    st.json(parse_json_cell(thread.get("counseling_plan"), {}), expanded=False)
-                    st.markdown("### 內部對話分析（學生不可見）")
-                    st.json(parse_json_cell(thread.get("chat_analysis"), {}), expanded=False)
+                    with st.expander("內部諮商計畫（學生不可見）"):
+                        st.json(parse_json_cell(thread.get("counseling_plan"), {}), expanded=False)
+                    with st.expander("內部對話分析（學生不可見）"):
+                        st.json(parse_json_cell(thread.get("chat_analysis"), {}), expanded=False)
                 assessment = STORE.get_assessment(chosen)
                 if assessment:
-                    st.markdown("### AI 原始形成性回饋")
-                    parsed = parse_json_cell(assessment.get("parsed_json"), {})
-                    st.json(parsed, expanded=False)
-                st.markdown("### 教師人工成績與評語")
+                    with st.expander("AI 原始形成性回饋"):
+                        parsed = parse_json_cell(assessment.get("parsed_json"), {})
+                        st.json(parsed, expanded=False)
+                st.markdown("**教師人工成績與評語**")
                 with st.form(f"grade-{chosen}"):
-                    use_score = st.checkbox("本次填寫教師分數")
-                    teacher_score = st.number_input("教師分數", min_value=0, max_value=100, value=80, disabled=not use_score)
-                    teacher_comment = st.text_area("教師評語")
-                    if st.form_submit_button("另存教師評量"):
+                    score_col, comment_col = st.columns([1, 2.2], gap="medium")
+                    with score_col:
+                        use_score = st.checkbox("本次填寫教師分數")
+                        teacher_score = st.number_input("教師分數", min_value=0, max_value=100, value=80, disabled=not use_score)
+                    with comment_col:
+                        teacher_comment = st.text_area("教師評語", height=120)
+                    if st.form_submit_button("另存教師評量", type="primary", use_container_width=True):
                         STORE.add_teacher_grade(
                             chosen, str(row.get("participant_id")), st.session_state.email,
                             int(teacher_score) if use_score else None, teacher_comment,
@@ -911,18 +1071,24 @@ def teacher_dashboard() -> None:
     with tab3:
         teacher_settings_panel(settings)
     with tab4:
-        st.write("匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。whitelist 與 IdentityMap 含 Email，研究去識別化時應單獨保管或移除。")
-        try:
-            payload = export_research_zip()
-            st.download_button(
-                "下載完整後台 CSV 壓縮檔",
-                payload,
-                file_name=f"theory_agent_research_export_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-                mime="application/zip",
-                use_container_width=True,
+        with st.container(border=True):
+            st.markdown('<p class="ct-kicker">研究匯出</p>', unsafe_allow_html=True)
+            st.markdown("**下載完整後台 CSV 壓縮檔**")
+            st.caption(
+                "匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。"
+                "whitelist 與 IdentityMap 含 Email，研究去識別化時應單獨保管或移除。"
             )
-        except Exception as exc:
-            st.error(f"資料匯出失敗：{exc}")
+            try:
+                payload = export_research_zip()
+                st.download_button(
+                    "下載完整後台 CSV 壓縮檔",
+                    payload,
+                    file_name=f"theory_agent_research_export_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.error(f"資料匯出失敗：{exc}")
 
 
 if not st.session_state.authenticated:

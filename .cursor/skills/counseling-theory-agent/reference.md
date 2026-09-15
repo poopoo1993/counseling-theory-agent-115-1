@@ -65,7 +65,7 @@ SQLite tables (same names as former worksheets). Append-only research events: Ch
 
 **ChatLogs:** `turn_id`, `session_id`, `conversation_thread_id`, `participant_id`, `turn_index`, `speaker_role`, `speaker_id`, `content_raw`, `nonverbal_cues`, `timestamp`, `stage_at_turn`, `skill_labels`, `selected_skill_match`, `latency_ms`, `error_flag`
 
-**Threads:** `conversation_thread_id`, `participant_id`, `mode`, `continuation_role`, `school_id`, `school_name`, `selected_techniques`, `selected_technique_names`, `case_id`, `case_data`, `counseling_plan`, `chat_analysis`, `latest_snapshot`, `last_session_id`, `recent_turns`, `updated_at`, `status`
+**Threads:** `conversation_thread_id`, `participant_id`, `mode`, `continuation_role`, `school_id`, `school_name`, `selected_techniques`, `selected_technique_names`, `case_id`, `case_data`, `counseling_plan`, `chat_analysis`, `latest_snapshot`, `last_session_id`, `recent_turns`, `difficulty`, `updated_at`, `status`
 
 **Assessments:** `assessment_id`, `session_id`, `participant_id`, `mode`, `school_id`, `rubric_version`, `total_score`, `dimension_scores`, `skill_events`, `strengths`, `improvement_points`, `quoted_examples`, `next_practice_focus`, `encouragement`, `raw_model_output`, `parsed_json`, `created_at`
 

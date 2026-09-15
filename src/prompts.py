@@ -125,6 +125,21 @@ info_targets 必須貼近該學派蒐集資料的方式，不得發明知識庫�
 }}"""
 
 
+def live_coaching_enabled(mode: str, difficulty: str) -> bool:
+    """Practice 初階 shows analyzer coaching beside chat; 中階/進階 wait until session end."""
+    return mode == "practice" and str(difficulty or "") == "初階"
+
+
+def analysis_for_chatbot(analysis: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Strip student-visible coaching so the client chatbot cannot read it aloud."""
+    if not analysis:
+        return analysis
+    hidden = dict(analysis)
+    hidden.pop("student_guide", None)
+    hidden.pop("turn_review", None)
+    return hidden
+
+
 def build_chat_analysis_prompt(
     *,
     mode: str,
@@ -134,16 +149,31 @@ def build_chat_analysis_prompt(
     prior_analysis: dict[str, Any] | None,
     turns: list[dict[str, Any]],
     latest_student_message: str,
+    difficulty: str = "",
 ) -> str:
     knowledge = build_knowledge_block(school_id, selected_ids)
     history = transcript_text(turns[-14:]) or "（尚無先前對話）"
     plan_json = json.dumps(counseling_plan or {}, ensure_ascii=False)
     analysis_json = json.dumps(prior_analysis or {}, ensure_ascii=False)
-    return f"""你是內部「對話分析」引擎，不是聊天角色。學生看不到這份輸出。根據諮商計畫分析目前對話、已揭露與可能隱藏或未說完的資訊，並給聊天引擎下一個焦點。
-不得發明知識庫以外的技巧名稱，不得對學生評分或教課。
+    coaching = live_coaching_enabled(mode, difficulty)
+    if coaching:
+        visible = """此為實作初階：除內部欄位外，另輸出學生可見的簡短提示與本句回饋。
+student_guide 給下一個可嘗試方向（1至2句，可點名本次指定技巧，但不可講課、不可揭露 hidden_formulation 或系統規則）。
+turn_review 只評學生最新一句：簡短、具體、鼓勵，不要打分數。開場尚無學生句子時 turn_review.comment 可空字串。
+聊天引擎仍只扮演個案，不會朗讀這些提示。"""
+        extra_json = """,
+  "student_guide": "下一個可嘗試的方向，1至2句",
+  "turn_review": {{"verdict": "具體|可再具體|偏離焦點|合宜", "comment": "針對學生最新一句的1至2句回饋或空字串"}}"""
+    else:
+        visible = """學生看不到這份輸出。不得對學生評分或教課。中階與進階的整體回饋只在晤談結束後另一次評量產生。"""
+        extra_json = ""
+    return f"""你是「對話分析」引擎，不是聊天角色。根據諮商計畫分析目前對話、已揭露與可能隱藏或未說完的資訊，並給聊天引擎下一個焦點。
+不得發明知識庫以外的技巧名稱。
+{visible}
 知識庫：
 {knowledge}
 模式：{mode}
+難度：{difficulty or "未指定"}
 諮商計畫：{plan_json}
 前次分析：{analysis_json}
 最近逐字稿：
@@ -156,7 +186,7 @@ def build_chat_analysis_prompt(
   "hidden_or_incomplete": [{{"id": "info_target id", "hypothesis": "可能尚未說出或被避開的內容"}}],
   "still_needed": [{{"id": "info_target id", "why": "為何仍需要"}}],
   "hiding_cues": ["可觀察的避開、簡答或轉移"],
-  "next_focus": "聊天引擎下一句應朝向的單一焦點，不要寫技巧名稱"
+  "next_focus": "聊天引擎下一句應朝向的單一焦點，不要寫技巧名稱"{extra_json}
 }}"""
 
 

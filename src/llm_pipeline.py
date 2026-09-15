@@ -7,6 +7,7 @@ from typing import Any
 
 from .gemini_client import GeminiService, parse_json_response
 from .prompts import (
+    analysis_for_chatbot,
     build_chat_analysis_prompt,
     build_counseling_plan_prompt,
     build_dialogue_prompt,
@@ -57,6 +58,7 @@ def analyze_chat(
     prior_analysis: dict[str, Any] | None,
     turns: list[dict[str, Any]],
     latest_student_message: str,
+    difficulty: str = "",
 ) -> dict[str, Any]:
     try:
         raw = service.generate_text(
@@ -68,8 +70,9 @@ def analyze_chat(
                 prior_analysis=prior_analysis,
                 turns=turns,
                 latest_student_message=latest_student_message,
+                difficulty=difficulty,
             ),
-            system_instruction="你是內部對話分析引擎，只輸出 JSON。學生看不到這份分析。",
+            system_instruction="你是對話分析引擎，只輸出 JSON。",
             temperature=0.1,
             max_output_tokens=1600,
             response_json=True,
@@ -103,7 +106,7 @@ def generate_chat_reply(
         continuation_snapshot=continuation_snapshot,
         is_opening=is_opening,
         counseling_plan=counseling_plan,
-        chat_analysis=chat_analysis,
+        chat_analysis=analysis_for_chatbot(chat_analysis),
     )
     started = time.perf_counter()
     response = service.generate_text(

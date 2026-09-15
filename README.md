@@ -42,7 +42,9 @@ theory-agent-v1/
 │  ├─ theory_library.py
 │  └─ transcript.py
 ├─ scripts/
-│  └─ check_project.py
+│  ├─ check_project.py
+│  ├─ seed_local_whitelist.py
+│  └─ start_local.sh
 ├─ tests/
 └─ docs/
    ├─ DEPLOYMENT_GUIDE.md
@@ -55,16 +57,16 @@ theory-agent-v1/
 
 ## 本機測試
 
-需要 Python 3.11 以上。先複製 `.streamlit/secrets.toml.example` 為 `.streamlit/secrets.toml`，再填入真實設定。`secrets.toml` 已由 `.gitignore` 排除，禁止上傳 GitHub。
+需要 Python 3.11 以上。最快本機啟動：
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python scripts\check_project.py
-python -m pytest -q
-streamlit run app.py
+```bash
+chmod +x scripts/start_local.sh
+./scripts/start_local.sh
 ```
+
+腳本會建立 `.venv`（若尚未有）、安裝套件、把 `poopoo1993@gmail.com` 寫入 SQLite 白名單（教師角色），並以 `local_demo_mode` 啟動；驗證碼會直接顯示在畫面上。
+
+也可手動複製 `.streamlit/secrets.toml.example` 為 `.streamlit/secrets.toml` 後自行 `streamlit run app.py`。`secrets.toml` 已由 `.gitignore` 排除，禁止上傳 GitHub。
 
 ## 正式部署前必讀
 

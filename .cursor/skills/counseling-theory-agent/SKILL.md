@@ -25,7 +25,7 @@ Do not violate these unless the user explicitly changes the product contract:
 
 1. **11 schools × 5 techniques.** Practice and experience both use **exactly 3** techniques per session. Experience uses `experience_default`; practice is student-chosen.
 2. **`src/theory_library.py` is the only source of school/technique names.** UI, prompts, and tests must load from `SCHOOLS`. Never invent a technique name in a prompt or screen.
-3. **Three in-session Gemini engines, then a separate post-session assessment.** Planner (once per session/continuation) and analyzer (each student turn) are internal JSON. Only the chatbot is visible. Chatbot must not teach, score, or name techniques. Formative scoring/analysis runs only after the student ends the session.
+3. **Three in-session Gemini engines, then a separate post-session assessment.** Planner (once per session/continuation) and analyzer (each student turn) are internal JSON **except practice 初階**, which also shows analyzer `student_guide` beside the chat and a simple `turn_review` per counselor sentence. The chatbot must not teach, score, or name techniques. Medium/hard practice and experience show formative review only after the session ends.
 4. **Experience never scores the student-as-client.** Practice scores counselor performance only. Teacher grades append to `TeacherGrades` and **never overwrite** `Assessments` or `raw_model_output`.
 5. **`ChatLogs.content_raw` is append-only.** Preserve full text, including parenthetical nonverbal cues. Do not rewrite past turns when re-scoring.
 6. **Student Gemini API Key stays in Streamlit session memory.** Never write it to SQLite, transcripts, logs, or exceptions.
@@ -104,7 +104,7 @@ IDs, sheet columns, speaker roles, and rubric JSON: [reference.md](reference.md)
 
 - Session modes: only `experience` | `practice`.
 - Speaker roles: `student_client`, `student_counselor`, `ai_client`, `ai_counselor`, `system`.
-- Practice themes: keys of `PRACTICE_THEMES` (Chinese labels in UI). Difficulty UI: `初階` / `中階` / `進階`.
+- Practice themes: keys of `PRACTICE_THEMES` (Chinese labels in UI). Difficulty UI: `初階` / `中階` / `進階`. Practice 初階 = live analyzer coaching; 中階/進階 = end-of-session review only.
 - `participant_id` is `P-` + 12 hex from `sha256(salt:email)`. Salt is a secret; never commit it.
 - JSON cells: `json_cell` / `parse_json_cell` (`ensure_ascii=False`).
 - Transcripts: UTF-8-SIG; filename `theory_agent_transcript_<session_id>.txt`.

@@ -37,7 +37,7 @@ SCHEMAS: dict[str, list[str]] = {
         "conversation_thread_id", "participant_id", "mode", "continuation_role", "school_id",
         "school_name", "selected_techniques", "selected_technique_names", "case_id", "case_data",
         "counseling_plan", "chat_analysis", "latest_snapshot", "last_session_id",
-        "recent_turns", "updated_at", "status",
+        "recent_turns", "difficulty", "updated_at", "status",
     ],
     "Assessments": [
         "assessment_id", "session_id", "participant_id", "mode", "school_id", "rubric_version",
