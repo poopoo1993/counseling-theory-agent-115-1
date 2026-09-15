@@ -462,6 +462,78 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   margin-bottom: 0.3rem;
 }
 
+.ct-online {
+  position: fixed;
+  top: 0.7rem;
+  right: 1rem;
+  z-index: 10050;
+  font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
+.ct-online details {
+  background: var(--ct-surface);
+  border: 1px solid var(--ct-line);
+  border-radius: 999px;
+  box-shadow: var(--ct-shadow);
+  min-width: 7.5rem;
+}
+
+.ct-online[data-openable="1"] details[open] {
+  border-radius: 16px;
+  min-width: 16rem;
+}
+
+.ct-online summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: default;
+  padding: 0.42rem 0.85rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--ct-ink);
+}
+
+.ct-online[data-openable="1"] summary {
+  cursor: pointer;
+}
+
+.ct-online summary::-webkit-details-marker {
+  display: none;
+}
+
+.ct-online-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #3f8f6b;
+  box-shadow: 0 0 0 4px rgba(63, 143, 107, 0.16);
+  flex-shrink: 0;
+}
+
+.ct-online ul {
+  margin: 0;
+  padding: 0 0.85rem 0.75rem;
+  list-style: none;
+  border-top: 1px solid var(--ct-line);
+}
+
+.ct-online li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-top: 0.55rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.ct-online li span {
+  color: var(--ct-muted);
+  flex-shrink: 0;
+}
+
 .ct-coach {
   background: var(--ct-surface);
   border: 1px solid var(--ct-line);
@@ -589,6 +661,33 @@ def render_safety_notice() -> None:
             <strong>教學演練用途</strong>
             {escape_html(SAFETY_NOTICE)}
           </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_online_badge(people: Sequence[Mapping[str, Any]], *, show_people: bool) -> None:
+    st = _st()
+    count = len(people)
+    label = f"{count} 人在線"
+    items = ""
+    can_open = show_people and count > 0
+    if can_open:
+        rows = []
+        for person in people:
+            role = "教師" if str(person.get("role", "")) == "teacher" else "學生"
+            rows.append(
+                f"<li>{escape_html(person.get('email', ''))}<span>{role}</span></li>"
+            )
+        items = f"<ul>{''.join(rows)}</ul>"
+    st.markdown(
+        f"""
+        <div class="ct-online" data-openable="{1 if can_open else 0}">
+          <details>
+            <summary><span class="ct-online-dot" aria-hidden="true"></span>{escape_html(label)}</summary>
+            {items}
+          </details>
         </div>
         """,
         unsafe_allow_html=True,

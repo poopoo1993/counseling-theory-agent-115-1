@@ -60,6 +60,7 @@ SCHEMAS: dict[str, list[str]] = {
     ],
     "AuthSessions": [
         "token_hash", "email", "participant_id", "role", "created_at", "expires_at",
+        "last_seen_at",
     ],
 }
 
@@ -183,6 +184,8 @@ class WhitelistMixin:
 class LoginSessionMixin:
     """Browser login tokens. Never store Gemini API keys here."""
 
+    online_window_seconds = 180
+
     def create_login_session(
         self,
         token_hash: str,
@@ -191,14 +194,16 @@ class LoginSessionMixin:
         role: str,
         ttl_seconds: int = 43200,
     ) -> None:
+        now = self.now()
         expires = datetime.now(ZoneInfo(self.timezone)) + timedelta(seconds=int(ttl_seconds))
         self.append("AuthSessions", {
             "token_hash": token_hash,
             "email": str(email or "").strip().lower(),
             "participant_id": participant_id,
             "role": role,
-            "created_at": self.now(),
+            "created_at": now,
             "expires_at": expires.isoformat(timespec="seconds"),
+            "last_seen_at": now,
         })
 
     def get_login_session(self, token_hash: str) -> dict[str, Any] | None:
@@ -222,6 +227,48 @@ class LoginSessionMixin:
 
     def delete_login_session(self, token_hash: str) -> None:
         self._delete_by_key("AuthSessions", "token_hash", str(token_hash or ""))
+
+    def touch_login_session(self, token_hash: str) -> None:
+        row = self.get_login_session(token_hash)
+        if not row:
+            return
+        row["last_seen_at"] = self.now()
+        self._upsert_by_key("AuthSessions", "token_hash", str(row["token_hash"]), row)
+
+    def list_online_users(self, within_seconds: int | None = None) -> list[dict[str, str]]:
+        window = int(within_seconds if within_seconds is not None else self.online_window_seconds)
+        now = datetime.now(ZoneInfo(self.timezone))
+        cutoff = now - timedelta(seconds=window)
+        found: dict[str, dict[str, str]] = {}
+        for row in self.all_records("AuthSessions"):
+            email = str(row.get("email") or "").strip().lower()
+            raw_seen = str(row.get("last_seen_at") or "").strip()
+            raw_expires = str(row.get("expires_at") or "").strip()
+            if not email or not raw_seen:
+                continue
+            try:
+                seen = datetime.fromisoformat(raw_seen)
+                expires = datetime.fromisoformat(raw_expires) if raw_expires else seen
+            except ValueError:
+                continue
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=ZoneInfo(self.timezone))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=ZoneInfo(self.timezone))
+            if seen < cutoff or expires < now:
+                continue
+            stamp = seen.isoformat(timespec="seconds")
+            previous = found.get(email)
+            if previous is None or stamp > previous.get("last_seen_at", ""):
+                found[email] = {
+                    "email": email,
+                    "role": str(row.get("role") or "student"),
+                    "participant_id": str(row.get("participant_id") or ""),
+                    "last_seen_at": stamp,
+                }
+        people = list(found.values())
+        people.sort(key=lambda item: (0 if item.get("role") == "teacher" else 1, item.get("email", "")))
+        return people
 
 
 def normalize_private_key(value: Any) -> str:

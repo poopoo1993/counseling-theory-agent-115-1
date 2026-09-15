@@ -77,7 +77,7 @@ SQLite tables (same names as former worksheets). Append-only research events: Ch
 
 **RiskEvents:** `risk_event_id`, `session_id`, `participant_id`, `timestamp`, `event_type`, `action_taken`, `content_redacted`
 
-**AuthSessions:** `token_hash`, `email`, `participant_id`, `role`, `created_at`, `expires_at` — operational login restore only; hashed `sid` query token; never store API keys; omit from research ZIP.
+**AuthSessions:** `token_hash`, `email`, `participant_id`, `role`, `created_at`, `expires_at`, `last_seen_at` — operational login restore and online presence only; hashed `sid` query token; never store API keys; omit from research ZIP. Online badge counts unique emails with `last_seen_at` in the last 3 minutes.
 
 Default settings keys: `system_enabled`, `open_start`, `open_end`, `max_sessions_per_student`, `duration_experience_min`, `duration_practice_min`, `allowed_modes`, `student_feedback_visible`, `student_score_visible`.
 

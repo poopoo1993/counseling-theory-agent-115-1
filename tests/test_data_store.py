@@ -70,6 +70,25 @@ def test_login_session_roundtrip_and_expiry(tmp_path):
     assert store.get_login_session(expired) is None
 
 
+def test_online_users_use_recent_last_seen(tmp_path):
+    from src.auth import hash_browser_session_token, new_browser_session_token
+
+    store = SqliteStore(str(tmp_path / "presence.sqlite"), "Asia/Taipei")
+    live = hash_browser_session_token(new_browser_session_token())
+    stale = hash_browser_session_token(new_browser_session_token())
+    store.create_login_session(live, "live@hcu.edu.tw", "P-LIVE", "teacher", ttl_seconds=60)
+    store.create_login_session(stale, "stale@hcu.edu.tw", "P-STALE", "student", ttl_seconds=60)
+    store._upsert_by_key("AuthSessions", "token_hash", stale, {
+        **store.get_login_session(stale),
+        "last_seen_at": "2000-01-01T00:00:00+08:00",
+    })
+    store.touch_login_session(live)
+    people = store.list_online_users(within_seconds=180)
+    emails = [item["email"] for item in people]
+    assert emails == ["live@hcu.edu.tw"]
+    assert people[0]["role"] == "teacher"
+
+
 def test_memory_store_preserves_identity_thread_and_raw_turn():
     store = MemoryStore("Asia/Taipei")
     participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")

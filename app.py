@@ -50,6 +50,7 @@ from src.ui import (
     render_empty_state,
     render_masthead,
     render_meta_grid,
+    render_online_badge,
     render_quote,
     render_role_callout,
     render_safety_notice,
@@ -233,6 +234,22 @@ def render_header(show_notice: bool = True) -> None:
         render_safety_notice()
 
 
+def show_online_people() -> None:
+    if st.session_state.get("authenticated"):
+        token = _browser_sid()
+        if token:
+            STORE.touch_login_session(hash_browser_session_token(token))
+    try:
+        people = STORE.list_online_users()
+    except Exception:
+        people = []
+    render_online_badge(people, show_people=bool(st.session_state.get("authenticated")))
+
+
+if hasattr(st, "fragment"):
+    show_online_people = st.fragment(run_every=15)(show_online_people)
+
+
 def complete_login(email: str) -> None:
     role = STORE.get_whitelist_role(email) or (
         "teacher" if account_is_teacher(email) else "student"
@@ -257,6 +274,7 @@ def complete_login(email: str) -> None:
 
 def password_setup_page() -> None:
     apply_theme("login")
+    show_online_people()
     render_header()
     email = normalize_email(st.session_state.pending_password_email)
     with st.container(border=True):
@@ -281,6 +299,7 @@ def password_setup_page() -> None:
 
 def login_page() -> None:
     apply_theme("login")
+    show_online_people()
     render_header()
     with st.container(border=True):
         st.markdown('<p class="ct-kicker">白名單登入</p>', unsafe_allow_html=True)
@@ -972,6 +991,7 @@ def student_page() -> None:
     error = student_access_error(settings)
     if error and not account_is_teacher():
         apply_theme("student")
+        show_online_people()
         render_header()
         st.error(error)
         return
@@ -986,8 +1006,10 @@ def student_page() -> None:
             if live_coaching_enabled(session.get("mode", ""), str(session.get("difficulty", "")))
             else "chat"
         )
+        show_online_people()
     else:
         apply_theme("student")
+        show_online_people()
         render_header(show_notice=not bool(st.session_state.active_session))
     if not st.session_state.api_validated or not st.session_state.api_key:
         api_key_gate()
@@ -1121,6 +1143,7 @@ def _school_display_name(school_id: str) -> str:
 
 def teacher_dashboard() -> None:
     apply_theme("teacher")
+    show_online_people()
     render_header(show_notice=True)
     if not account_is_teacher():
         st.error("此帳號沒有教師後台權限。")
