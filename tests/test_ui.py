@@ -28,6 +28,8 @@ def test_thought_log_styles_exist() -> None:
     assert ".ct-thought-item.student" in APP_CSS
     assert "[data-testid=\"InputInstructions\"]" in APP_CSS
     assert "span:not(:last-child)" in APP_CSS
+    assert "padding-top: 3.15rem" in APP_CSS
+    assert ":has(.ct-online)" in APP_CSS
 
 
 def test_experience_coaching_panel_is_observer_notes() -> None:

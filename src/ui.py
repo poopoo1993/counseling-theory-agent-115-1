@@ -54,7 +54,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   max-width: __MAX_WIDTH__;
   margin-left: auto !important;
   margin-right: auto !important;
-  padding-top: 1.35rem;
+  padding-top: 3.15rem;
   padding-bottom: 4.5rem;
   padding-left: 1.5rem;
   padding-right: 1.5rem;
@@ -95,6 +95,15 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   margin: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
+}
+
+[data-testid="stElementContainer"]:has(.ct-online),
+[data-testid="element-container"]:has(.ct-online) {
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
 }
 
 [data-testid="stVerticalBlockBorderWrapper"] {
@@ -481,8 +490,8 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 
 .ct-online {
   position: fixed;
-  top: 0.7rem;
-  right: 1rem;
+  top: 0.85rem;
+  right: 1.15rem;
   z-index: 10050;
   font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
 }
