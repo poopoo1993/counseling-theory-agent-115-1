@@ -130,7 +130,8 @@ After library edits: 11 schools, 5 techniques, 3 defaults. After prompt edits: r
 - **SQLite is the login/chat store.** Path `app.sqlite_path` default `data/app.sqlite` (gitignored). Login does not require Google Sheets. `GoogleSheetsStore` remains in code but is unused.
 - **Whitelist:** `is_email_allowed(email, store)` checks enabled SQLite rows only. Seed from `[auth].login_allowlist` and `[auth].teacher_emails` (or legacy `[app].teacher_test_emails`). Disabled rows cannot receive OTP.
 - **SMTP:** `[smtp]` or `[email]`. `local_demo_mode` only shows OTP on screen.
-- **Gemini 3:** `thinking_config.thinking_level` must stay `low` for short replies, or visible text can be empty.
+- **Gemini 3:** Prefer `thinking_config.thinking_level=low` when the installed `google-genai` ThinkingConfig has that field. Older SDKs (e.g. 1.47) only allow `thinking_budget` and reject `thinking_level` with pydantic `extra_forbidden`. Inspect fields, fall back to `thinking_budget=0` for low, and omit thinking_config if GenerateContentConfig still rejects it.
+- **Browser refresh:** Streamlit `session_state` is wiped on F5. Login is restored from a hashed `sid` query token in SQLite `AuthSessions` (TTL 12h). Never store the Gemini API Key there; refresh stays logged in but the key must be re-entered. Logout deletes the token. Skip `AuthSessions` in research ZIP export.
 - **Context window:** `AppConfig.recent_context_turns` defaults to 14 but dialogue currently slices `turns[-14:]` in `prompts.py`. Change both if changing window.
 - **Stored `temperature`:** `new_session` writes `0.4`; live calls use 0.55 (chatbot), 0.65 (planner), 0.1 (analyzer/eval/snapshot).
 - **`Sessions` vs `Threads`:** `school_name` is on the in-memory session and on Threads, not on the Sessions headers—extra keys are dropped on append.

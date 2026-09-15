@@ -11,12 +11,26 @@ def _section(source: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+DEFAULT_TEACHER_EMAILS = ("poopoo1993@gmail.com",)
+DEFAULT_LOGIN_ALLOWLIST = ("poopoo1993@gmail.com",)
+
+
 def _string_tuple(value: Any, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     if value is None:
         return default
     if isinstance(value, str):
         return (value.strip().lower(),) if value.strip() else default
     return tuple(str(item).strip().lower() for item in value if str(item).strip())
+
+
+def _merge_emails(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    seen: list[str] = []
+    for group in groups:
+        for email in group:
+            value = str(email or "").strip().lower()
+            if value and value not in seen:
+                seen.append(value)
+    return tuple(seen)
 
 
 @dataclass(frozen=True)
@@ -42,8 +56,14 @@ class AppConfig:
             auth.get("allowed_domains", app.get("allowed_domains", app.get("allowed_domain"))),
             ("hcu.edu.tw",),
         )
-        login_allowlist = _string_tuple(auth.get("login_allowlist"), legacy_test_emails)
-        teacher_emails = _string_tuple(auth.get("teacher_emails"), legacy_test_emails)
+        login_allowlist = _merge_emails(
+            _string_tuple(auth.get("login_allowlist"), legacy_test_emails),
+            DEFAULT_LOGIN_ALLOWLIST,
+        )
+        teacher_emails = _merge_emails(
+            _string_tuple(auth.get("teacher_emails"), legacy_test_emails),
+            DEFAULT_TEACHER_EMAILS,
+        )
         return cls(
             app_title=str(app.get("title", "諮商理論技巧訓練 Agent")),
             timezone=str(app.get("timezone", "Asia/Taipei")),

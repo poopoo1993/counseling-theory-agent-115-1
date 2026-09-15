@@ -50,6 +50,26 @@ def test_case_data_from_plan_keeps_opening_fields():
     assert "phase_goals" not in case
 
 
+def test_login_session_roundtrip_and_expiry(tmp_path):
+    from src.auth import hash_browser_session_token, new_browser_session_token
+
+    store = SqliteStore(str(tmp_path / "app.sqlite"), "Asia/Taipei")
+    token = new_browser_session_token()
+    digest = hash_browser_session_token(token)
+    store.create_login_session(digest, "student@hcu.edu.tw", "P-demo", "student", ttl_seconds=60)
+    row = store.get_login_session(digest)
+    assert row is not None
+    assert row["email"] == "student@hcu.edu.tw"
+    assert row["token_hash"] == digest
+    assert "api_key" not in row
+    store.delete_login_session(digest)
+    assert store.get_login_session(digest) is None
+
+    expired = hash_browser_session_token("expired-token")
+    store.create_login_session(expired, "student@hcu.edu.tw", "P-demo", "student", ttl_seconds=-1)
+    assert store.get_login_session(expired) is None
+
+
 def test_memory_store_preserves_identity_thread_and_raw_turn():
     store = MemoryStore("Asia/Taipei")
     participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")

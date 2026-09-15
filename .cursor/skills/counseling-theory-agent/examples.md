@@ -81,4 +81,4 @@ teacher_emails = ["you@example.com"]
 login_allowlist = ["you@example.com"]
 ```
 
-Login shows the OTP on screen. Chat persists in SQLite across refresh. Seed teachers/students into whitelist; do not rely on open `@hcu.edu.tw` domain login.
+Login shows the OTP on screen. Chat persists in SQLite across refresh. Login also survives refresh via hashed `sid` (API Key must be re-entered). Seed teachers/students into whitelist; do not rely on open `@hcu.edu.tw` domain login.

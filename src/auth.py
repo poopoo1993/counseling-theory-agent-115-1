@@ -1,4 +1,4 @@
-"""電子郵件 OTP 登入。OTP 僅存於當前 Streamlit session。"""
+"""電子郵件 OTP 登入。OTP 僅存於當前 Streamlit session；瀏覽器 sid 只存雜湊。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,18 @@ def is_teacher(email: str, store: Any, fallback_teacher_emails: tuple[str, ...] 
     if role:
         return role == "teacher"
     return normalize_email(email) in fallback_teacher_emails
+
+
+BROWSER_SESSION_QUERY_KEY = "sid"
+BROWSER_SESSION_TTL_SECONDS = 12 * 3600
+
+
+def new_browser_session_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def hash_browser_session_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
 
 
 def create_otp(ttl_seconds: int = 600) -> tuple[str, str, float]:

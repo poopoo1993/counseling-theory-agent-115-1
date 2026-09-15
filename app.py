@@ -11,7 +11,18 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-from src.auth import create_otp, is_email_allowed, is_teacher, normalize_email, send_otp_email, verify_otp
+from src.auth import (
+    BROWSER_SESSION_QUERY_KEY,
+    BROWSER_SESSION_TTL_SECONDS,
+    create_otp,
+    hash_browser_session_token,
+    is_email_allowed,
+    is_teacher,
+    new_browser_session_token,
+    normalize_email,
+    send_otp_email,
+    verify_otp,
+)
 from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
 from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
 from src.gemini_client import GeminiService, parse_json_response
@@ -114,6 +125,45 @@ def get_store():
 STORE = get_store()
 
 
+def _browser_sid() -> str:
+    raw = st.query_params.get(BROWSER_SESSION_QUERY_KEY)
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    return str(raw or "").strip()
+
+
+def _clear_browser_sid() -> None:
+    try:
+        del st.query_params[BROWSER_SESSION_QUERY_KEY]
+    except (KeyError, Exception):
+        pass
+
+
+def restore_browser_session() -> None:
+    """Refresh wipes Streamlit memory; a hashed URL token restores login only."""
+    if st.session_state.authenticated:
+        return
+    token = _browser_sid()
+    if not token:
+        return
+    digest = hash_browser_session_token(token)
+    row = STORE.get_login_session(digest)
+    if not row:
+        _clear_browser_sid()
+        return
+    email = normalize_email(str(row.get("email", "")))
+    if not is_email_allowed(email, STORE):
+        STORE.delete_login_session(digest)
+        _clear_browser_sid()
+        return
+    role = STORE.get_whitelist_role(email) or str(row.get("role") or "student")
+    participant_id = STORE.get_or_create_participant(email, role, participant_salt())
+    st.session_state.authenticated = True
+    st.session_state.email = email
+    st.session_state.participant_id = participant_id
+    st.session_state.view = "teacher" if role == "teacher" else "student"
+
+
 def participant_salt() -> str:
     auth = SECRETS.get("auth", {})
     app = SECRETS.get("app", {})
@@ -163,6 +213,10 @@ def persist_thread_state(status: str = "in_progress") -> None:
 
 
 def logout() -> None:
+    token = _browser_sid()
+    if token:
+        STORE.delete_login_session(hash_browser_session_token(token))
+    _clear_browser_sid()
     for key in list(st.session_state.keys()):
         if key not in {"data_store", "store_mode", "store_error"}:
             del st.session_state[key]
@@ -216,6 +270,15 @@ def login_page() -> None:
                     "teacher" if account_is_teacher(email) else "student"
                 )
                 participant_id = STORE.get_or_create_participant(email, role, participant_salt())
+                token = new_browser_session_token()
+                STORE.create_login_session(
+                    hash_browser_session_token(token),
+                    email,
+                    participant_id,
+                    role,
+                    BROWSER_SESSION_TTL_SECONDS,
+                )
+                st.query_params[BROWSER_SESSION_QUERY_KEY] = token
                 st.session_state.authenticated = True
                 st.session_state.email = email
                 st.session_state.participant_id = participant_id
@@ -287,6 +350,7 @@ def api_key_gate() -> GeminiService | None:
         st.caption(
             "請用個人的 @gmail.com 帳號到 Google AI Studio 申請 API Key。"
             "Key 只留在目前瀏覽器工作階段，不會寫入 SQLite、逐字稿或研究資料。"
+            "重新整理後仍保持登入，但需再輸入一次 API Key。"
         )
         st.link_button("前往 Google AI Studio", "https://aistudio.google.com/", use_container_width=True)
         key_col, action_col = st.columns([3.2, 1], gap="small", vertical_alignment="bottom")
@@ -898,6 +962,8 @@ def export_research_zip() -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         for sheet in SCHEMAS:
+            if sheet == "AuthSessions":
+                continue
             rows = STORE.all_records(sheet)
             frame = pd.DataFrame(rows, columns=SCHEMAS[sheet])
             zf.writestr(f"{sheet}.csv", frame.to_csv(index=False).encode("utf-8-sig"))
@@ -1091,6 +1157,7 @@ def teacher_dashboard() -> None:
                 st.error(f"資料匯出失敗：{exc}")
 
 
+restore_browser_session()
 if not st.session_state.authenticated:
     login_page()
 else:

@@ -11,12 +11,72 @@ from google import genai
 from google.genai import types
 
 
+def _thinking_field_names() -> set[str]:
+    thinking_cls = getattr(types, "ThinkingConfig", None)
+    if thinking_cls is None:
+        return set()
+    fields = getattr(thinking_cls, "model_fields", None) or getattr(thinking_cls, "__fields__", {}) or {}
+    return set(fields)
+
+
+def build_thinking_config(model_name: str, thinking_level: str = "low") -> Any | None:
+    """Gemini 3 needs low thinking so short replies are not empty.
+
+    Installed google-genai versions disagree on the field name:
+    newer SDKs use thinking_level; older ones only accept thinking_budget.
+    """
+    if not str(model_name or "").startswith("gemini-3"):
+        return None
+    names = _thinking_field_names()
+    thinking_cls = getattr(types, "ThinkingConfig", None)
+    kwargs: dict[str, Any] = {}
+    if "thinking_level" in names:
+        kwargs["thinking_level"] = thinking_level
+    elif "thinking_budget" in names:
+        kwargs["thinking_budget"] = 0 if str(thinking_level).lower() == "low" else 1024
+    if thinking_cls is None or not kwargs:
+        return None
+    try:
+        return thinking_cls(**kwargs)
+    except Exception:
+        if "thinking_budget" in names:
+            try:
+                return thinking_cls(thinking_budget=0 if str(thinking_level).lower() == "low" else 1024)
+            except Exception:
+                return None
+        return None
+
+
 class GeminiService:
     def __init__(self, api_key: str, model_name: str):
         if not api_key or not api_key.strip():
             raise ValueError("Gemini API Key 不可空白。")
         self.client = genai.Client(api_key=api_key.strip())
         self.model_name = model_name
+
+    def _content_config(
+        self,
+        *,
+        system_instruction: str | None,
+        temperature: float,
+        max_output_tokens: int,
+        response_json: bool,
+        thinking_level: str,
+    ) -> Any:
+        config_values: dict[str, Any] = dict(
+            system_instruction=system_instruction,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            response_mime_type="application/json" if response_json else "text/plain",
+        )
+        thinking = build_thinking_config(self.model_name, thinking_level)
+        if thinking is not None:
+            config_values["thinking_config"] = thinking
+        try:
+            return types.GenerateContentConfig(**config_values)
+        except Exception:
+            config_values.pop("thinking_config", None)
+            return types.GenerateContentConfig(**config_values)
 
     def generate_text(
         self,
@@ -29,18 +89,13 @@ class GeminiService:
         thinking_level: str = "low",
         attempts: int = 3,
     ) -> str:
-        config_values: dict[str, Any] = dict(
+        config = self._content_config(
             system_instruction=system_instruction,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            response_mime_type="application/json" if response_json else "text/plain",
+            response_json=response_json,
+            thinking_level=thinking_level,
         )
-        # Gemini 3 uses dynamic thinking and defaults to high.  Explicit low
-        # thinking prevents short responses from spending the whole output
-        # allowance before producing visible text.
-        if self.model_name.startswith("gemini-3"):
-            config_values["thinking_config"] = {"thinking_level": thinking_level}
-        config = types.GenerateContentConfig(**config_values)
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:

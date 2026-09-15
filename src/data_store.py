@@ -11,12 +11,12 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from .config import DEFAULT_SETTINGS
+from .config import DEFAULT_LOGIN_ALLOWLIST, DEFAULT_SETTINGS, DEFAULT_TEACHER_EMAILS
 
 
 SCHEMAS: dict[str, list[str]] = {
@@ -57,6 +57,9 @@ SCHEMAS: dict[str, list[str]] = {
     "RiskEvents": [
         "risk_event_id", "session_id", "participant_id", "timestamp", "event_type",
         "action_taken", "content_redacted",
+    ],
+    "AuthSessions": [
+        "token_hash", "email", "participant_id", "role", "created_at", "expires_at",
     ],
 }
 
@@ -129,9 +132,17 @@ class WhitelistMixin:
             "created_at": existing.get("created_at") or self.now(),
         })
 
-    def seed_whitelist(self, login_allowlist: tuple[str, ...], teacher_emails: tuple[str, ...]) -> None:
-        teachers = tuple(str(item).strip().lower() for item in teacher_emails if str(item).strip())
-        allow = tuple(str(item).strip().lower() for item in login_allowlist if str(item).strip())
+    def seed_whitelist(self, login_allowlist: tuple[str, ...] = (), teacher_emails: tuple[str, ...] = ()) -> None:
+        teachers = tuple(dict.fromkeys(
+            str(item).strip().lower()
+            for item in (*teacher_emails, *DEFAULT_TEACHER_EMAILS)
+            if str(item).strip()
+        ))
+        allow = tuple(dict.fromkeys(
+            str(item).strip().lower()
+            for item in (*login_allowlist, *DEFAULT_LOGIN_ALLOWLIST)
+            if str(item).strip()
+        ))
         for email in teachers:
             existing = self._whitelist_row(email)
             enabled = _flag_enabled(existing.get("enabled", "true")) if existing else True
@@ -145,6 +156,50 @@ class WhitelistMixin:
         rows = self.all_records("whitelist")
         rows.sort(key=lambda r: str(r.get("email", "")))
         return rows
+
+
+class LoginSessionMixin:
+    """Browser login tokens. Never store Gemini API keys here."""
+
+    def create_login_session(
+        self,
+        token_hash: str,
+        email: str,
+        participant_id: str,
+        role: str,
+        ttl_seconds: int = 43200,
+    ) -> None:
+        expires = datetime.now(ZoneInfo(self.timezone)) + timedelta(seconds=int(ttl_seconds))
+        self.append("AuthSessions", {
+            "token_hash": token_hash,
+            "email": str(email or "").strip().lower(),
+            "participant_id": participant_id,
+            "role": role,
+            "created_at": self.now(),
+            "expires_at": expires.isoformat(timespec="seconds"),
+        })
+
+    def get_login_session(self, token_hash: str) -> dict[str, Any] | None:
+        digest = str(token_hash or "")
+        if not digest:
+            return None
+        now = datetime.now(ZoneInfo(self.timezone))
+        for row in self.all_records("AuthSessions"):
+            if str(row.get("token_hash", "")) != digest:
+                continue
+            try:
+                expires = datetime.fromisoformat(str(row.get("expires_at", "")))
+            except ValueError:
+                continue
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=ZoneInfo(self.timezone))
+            if expires >= now:
+                return dict(row)
+            self._delete_by_key("AuthSessions", "token_hash", digest)
+        return None
+
+    def delete_login_session(self, token_hash: str) -> None:
+        self._delete_by_key("AuthSessions", "token_hash", str(token_hash or ""))
 
 
 def normalize_private_key(value: Any) -> str:
@@ -390,7 +445,7 @@ class GoogleSheetsStore(WhitelistMixin):
         })
 
 
-class MemoryStore(WhitelistMixin):
+class MemoryStore(WhitelistMixin, LoginSessionMixin):
     """僅供單元測試；重新整理或換使用者後資料不保留。"""
 
     def __init__(self, timezone: str):
@@ -415,6 +470,9 @@ class MemoryStore(WhitelistMixin):
                 return
         self.append(sheet, record)
 
+    def _delete_by_key(self, sheet: str, key: str, value: str) -> None:
+        self.rows[sheet] = [row for row in self.rows[sheet] if str(row.get(key)) != str(value)]
+
     get_or_create_participant = GoogleSheetsStore.get_or_create_participant
     start_session = GoogleSheetsStore.start_session
     finish_session = GoogleSheetsStore.finish_session
@@ -430,7 +488,7 @@ class MemoryStore(WhitelistMixin):
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
 
 
-class SqliteStore(WhitelistMixin):
+class SqliteStore(WhitelistMixin, LoginSessionMixin):
     """Persistent login list and account chat. API keys must never be written here."""
 
     def __init__(self, path: str, timezone: str):
@@ -507,6 +565,13 @@ class SqliteStore(WhitelistMixin):
             self.conn.execute(
                 f"UPDATE {self._quoted(sheet)} SET {assignments} WHERE \"{key}\" = ?",
                 values,
+            )
+
+    def _delete_by_key(self, sheet: str, key: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                f"DELETE FROM {self._quoted(sheet)} WHERE \"{key}\" = ?",
+                (str(value),),
             )
 
     get_or_create_participant = GoogleSheetsStore.get_or_create_participant

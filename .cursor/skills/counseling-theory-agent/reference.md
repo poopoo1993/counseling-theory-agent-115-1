@@ -77,6 +77,8 @@ SQLite tables (same names as former worksheets). Append-only research events: Ch
 
 **RiskEvents:** `risk_event_id`, `session_id`, `participant_id`, `timestamp`, `event_type`, `action_taken`, `content_redacted`
 
+**AuthSessions:** `token_hash`, `email`, `participant_id`, `role`, `created_at`, `expires_at` — operational login restore only; hashed `sid` query token; never store API keys; omit from research ZIP.
+
 Default settings keys: `system_enabled`, `open_start`, `open_end`, `max_sessions_per_student`, `duration_experience_min`, `duration_practice_min`, `allowed_modes`, `student_feedback_visible`, `student_score_visible`.
 
 ## Practice case JSON
@@ -132,11 +134,13 @@ Retry 3 times on 429/quota/timeout/503. Default model config: `gemini-3.8-flash`
 ## Auth and config
 
 - Login: enabled SQLite `whitelist` row, then OTP. No open school-domain login.
+- After OTP, set URL `sid` (random token); SQLite stores only `sha256(sid)` in `AuthSessions` for ~12h so refresh stays logged in.
 - Seed: `[auth].login_allowlist` + `[auth].teacher_emails` (legacy `[app].teacher_test_emails`).
 - OTP: 6 digits, hashed `salt:sha256` in session state, default TTL 600s, resend cooldown 60s.
 - `local_demo_mode`: show OTP on screen.
 - `participant_salt` under `[auth]` or `[app]`.
 - SQLite path: `[app].sqlite_path` default `data/app.sqlite`.
+- Student Gemini API Key stays in Streamlit memory only. Refresh does not restore the key.
 
 ## Safety
 
