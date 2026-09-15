@@ -1,4 +1,4 @@
-from src.ui import escape_html, mode_label, ROLE_LABELS
+from src.ui import coaching_panel_copy, escape_html, mode_label, ROLE_LABELS
 
 
 def test_escape_html_prevents_markup_injection() -> None:
@@ -28,3 +28,14 @@ def test_thought_log_styles_exist() -> None:
     assert ".ct-thought-item.student" in APP_CSS
     assert "[data-testid=\"InputInstructions\"]" in APP_CSS
     assert "span:not(:last-child)" in APP_CSS
+
+
+def test_experience_coaching_panel_is_observer_notes() -> None:
+    copy = coaching_panel_copy("experience")
+    assert copy["title"] == "此刻示範說明"
+    assert copy["guide_label"] == "諮商師此刻在做什麼"
+    assert copy["examples_label"] == ""
+    assert "預告" in copy["guide_empty"]
+    practice = coaching_panel_copy("practice")
+    assert practice["examples_label"] == "符合此刻的例句"
+    assert practice["title"] == "初階練習提示"

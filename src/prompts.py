@@ -139,6 +139,11 @@ def live_plan_visible(difficulty: str) -> bool:
     return coaching_tier(difficulty) == "easy"
 
 
+def thought_coach_visible(mode: str, difficulty: str) -> bool:
+    """實作初階才顯示旁欄想法框；體驗（學生當個案）不顯示。"""
+    return mode == "practice" and live_plan_visible(difficulty)
+
+
 def turn_review_visible(difficulty: str) -> bool:
     """初階與中階在對話中顯示單句回饋／目標效果。"""
     return coaching_tier(difficulty) in {"easy", "medium"}
@@ -176,13 +181,11 @@ def _analyzer_visible_instructions(mode: str, difficulty: str) -> tuple[str, str
         )
     if mode == "experience":
         if live_plan_visible(difficulty):
-            visible = """此為體驗初階：學生當個案。除內部欄位外，另輸出學生可見的此刻示範計畫與本句說明。
-student_guide 依當下逐字稿說明諮商師接下來的計畫與做法（2至4句，可點名本次指定技巧，但不可講課、不可評分學生的個案表現）。
-example_replies 給 1至2 句符合此刻談話的示範例句，須像諮商師下一句可能會說的話。
-turn_review 說明「即將／本輪」示範諮商師那一句的目標與預期效果，不要評分學生。"""
+            visible = """此為體驗初階：學生當個案。除內部欄位外，另輸出學生可見的此刻示範說明與本句說明。
+student_guide 依當下逐字稿說明「諮商師此刻在做什麼、為何這樣做」（2至4句，可點名本次指定技巧）。不可講課、不可預告下一句台詞、不可評分學生的個案表現。不要輸出 example_replies。
+turn_review 說明本輪示範諮商師那一句的目標與預期效果，不要評分學生。"""
             extra = """,
-  "student_guide": "依現況調整的接下來計畫與做法",
-  "example_replies": ["符合此刻的示範例句"],
+  "student_guide": "諮商師此刻在做什麼、為何這樣做",
   "turn_review": {{"goal": "本句目標，一句", "effect": "預期效果，一句", "comment": ""}}"""
             return visible, extra
         visible = """此為體驗中階：學生當個案。只輸出本句目標與預期效果，不要給諮商計畫或例句，不可評分學生的個案表現。"""

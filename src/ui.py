@@ -823,7 +823,11 @@ def render_user_card(email: str, participant_id: str, role_label: str) -> None:
 def render_role_callout(mode: str) -> None:
     st = _st()
     if mode == "experience":
-        yours, ai, hint = "你擔任個案", "AI 擔任示範諮商師", "結束後才解析技巧，不會評分你的個案表現。"
+        yours, ai, hint = (
+            "你擔任個案",
+            "AI 擔任示範諮商師",
+            "用虛構或低敏感內容說話即可。系統不評分你的個案表現，旁側與對話中的說明是在解說 AI 諮商師。",
+        )
     else:
         yours, ai, hint = "你擔任諮商師", "AI 擔任模擬個案", "請從五項技巧中選恰好三項，系統會建立具練習機會的案例。"
     st.markdown(
@@ -882,6 +886,24 @@ def render_empty_state(title: str, body: str) -> None:
     )
 
 
+def coaching_panel_copy(mode: str) -> dict[str, str]:
+    if mode == "experience":
+        return {
+            "title": "此刻示範說明",
+            "guide_label": "諮商師此刻在做什麼",
+            "guide_empty": "送出一句後，這裡會說明示範諮商師此刻的做法與用意，不會預告下一句台詞。",
+            "examples_label": "",
+            "examples_empty": "",
+        }
+    return {
+        "title": "初階練習提示",
+        "guide_label": "接下來的計畫與做法",
+        "guide_empty": "送出一句後，這裡會依此刻談話更新計畫與做法。",
+        "examples_label": "符合此刻的例句",
+        "examples_empty": "符合此刻談話的例句會顯示在這裡。",
+    }
+
+
 def render_coaching_panel(
     *,
     mode: str,
@@ -889,24 +911,26 @@ def render_coaching_panel(
     examples: Sequence[str] | None = None,
 ) -> None:
     st = _st()
+    copy = coaching_panel_copy(mode)
     guide_text = str(guide or "").strip()
     example_items = [str(item).strip() for item in (examples or []) if str(item).strip()]
-    title = "此刻示範計畫" if mode == "experience" else "初階練習提示"
     guide_html = (
         f"<p>{escape_html(guide_text)}</p>"
         if guide_text
-        else '<p class="ct-coach-empty">送出一句後，這裡會依此刻談話更新計畫與做法。</p>'
+        else f'<p class="ct-coach-empty">{escape_html(copy["guide_empty"])}</p>'
     )
-    if example_items:
-        example_html = "".join(f"<p class=\"ct-coach-example\">{escape_html(item)}</p>" for item in example_items)
-    else:
-        example_html = '<p class="ct-coach-empty">符合此刻談話的例句會顯示在這裡。</p>'
+    blocks = f'<div class="ct-coach-block"><span>{escape_html(copy["guide_label"])}</span>{guide_html}</div>'
+    if copy["examples_label"]:
+        if example_items:
+            example_html = "".join(f"<p class=\"ct-coach-example\">{escape_html(item)}</p>" for item in example_items)
+        else:
+            example_html = f'<p class="ct-coach-empty">{escape_html(copy["examples_empty"])}</p>'
+        blocks += f'<div class="ct-coach-block"><span>{escape_html(copy["examples_label"])}</span>{example_html}</div>'
     st.markdown(
         f"""
         <div class="ct-coach">
-          <p class="ct-kicker">{escape_html(title)}</p>
-          <div class="ct-coach-block"><span>接下來的計畫與做法</span>{guide_html}</div>
-          <div class="ct-coach-block"><span>符合此刻的例句</span>{example_html}</div>
+          <p class="ct-kicker">{escape_html(copy["title"])}</p>
+          {blocks}
         </div>
         """,
         unsafe_allow_html=True,

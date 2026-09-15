@@ -37,6 +37,7 @@ from src.prompts import (
     build_snapshot_prompt,
     case_data_from_plan,
     live_plan_visible,
+    thought_coach_visible,
     turn_review_visible,
     uses_planner_llm,
 )
@@ -701,18 +702,19 @@ def new_practice_panel(settings: dict[str, str]) -> None:
                 st.caption("進階不會在對話中提示；整體回饋在結束晤談後一次給出。")
         else:
             if difficulty == "初階":
-                st.caption("初階會在旁邊顯示諮商師此刻的計畫、做法與例句；AI 每一句會標出目標與預期效果。")
+                st.caption("初階會在旁邊說明諮商師此刻在做什麼；AI 每一句會標出目標與預期效果。不會預告下一句台詞，也不評分你的個案表現。")
             elif difficulty == "中階":
-                st.caption("中階只在對話中標出 AI 每一句的目標與預期效果，不顯示諮商計畫。")
+                st.caption("中階只在對話中標出 AI 每一句的目標與預期效果，不顯示旁欄說明，也不評分你的個案表現。")
             else:
-                st.caption("進階不會在對話中提示；結束後再解析 AI 示範。")
+                st.caption("進階不會在對話中提示；結束後再解析 AI 示範，不評分你的個案表現。")
     ready = len(selected) == 3
     if st.button("開始新的模擬", type="primary", use_container_width=True, disabled=not ready):
         if len(selected) != 3:
             st.error("開始前必須選擇恰好三項技巧。")
             return
         try:
-            with st.spinner("正在擬定學派計畫並建立開場…"):
+            spinner = "正在擬定學派計畫並建立開場…" if uses_planner_llm(mode, difficulty) else "正在開始示範晤談…"
+            with st.spinner(spinner):
                 start_new_session(mode, school_id, list(selected), PRACTICE_THEMES[theme_id], difficulty)
             st.rerun()
         except Exception as exc:
@@ -805,6 +807,8 @@ def stop_simulation_for_risk(session: dict[str, Any], prompt: str) -> None:
 
 
 def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> None:
+    if not thought_coach_visible(str(session.get("mode", "")), str(session.get("difficulty", ""))):
+        return
     notes = list(st.session_state.get("coach_thoughts") or [])
     st.markdown('<div class="ct-thoughts"><p class="ct-kicker">當下的想法與判斷</p></div>', unsafe_allow_html=True)
     render_thought_log(notes)
@@ -893,8 +897,16 @@ def render_chat() -> None:
                 st.markdown('<p class="ct-kicker">' + mode_label(session["mode"]) + "</p>", unsafe_allow_html=True)
                 st.markdown(f"**{session['school_name']}**")
                 render_chips(session["selected_technique_names"])
-                extra = " · 初階即時計畫開啟" if show_plan else (" · 單句說明開啟" if show_turn_review else "")
-                st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
+                extra = ""
+                if session["mode"] == "experience":
+                    if show_plan:
+                        extra = " · 旁欄說明示範重點"
+                    elif show_turn_review:
+                        extra = " · 單句示範說明開啟"
+                    st.caption(f"你正以個案身分對話，約 {elapsed_min} 分鐘 · 建議 {target_minutes} 分鐘{extra}。不評分個案表現；由你自行決定何時結束。")
+                else:
+                    extra = " · 初階即時計畫開啟" if show_plan else (" · 單句說明開啟" if show_turn_review else "")
+                    st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
             with action_col:
                 if st.button("結束晤談", use_container_width=True):
                     finalize_session()
@@ -908,13 +920,15 @@ def render_chat() -> None:
         st.caption("可在括弧中輸入非語言訊息，例如（語氣放緩）、（停頓數秒）。")
 
     prompt = None
+    is_client = session["mode"] == "experience"
+    chat_placeholder = "以個案身分說說你的感受或想法…" if is_client else "輸入你的諮商回應…"
     if show_plan:
-        chat_col, coach_col = st.columns([1.55, 1], gap="large")
+        chat_col, coach_col = st.columns([1.8, 1] if is_client else [1.55, 1], gap="large")
         with chat_col:
             render_dialog()
-            prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
+            prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
         with coach_col:
-            examples = analysis.get("example_replies")
+            examples = analysis.get("example_replies") if not is_client else []
             if not isinstance(examples, list):
                 examples = []
             render_coaching_panel(
@@ -922,10 +936,11 @@ def render_chat() -> None:
                 guide=str(analysis.get("student_guide", "")),
                 examples=examples,
             )
-            render_thought_coach(session, analysis)
+            if thought_coach_visible(str(session.get("mode", "")), str(session.get("difficulty", ""))):
+                render_thought_coach(session, analysis)
     else:
         render_dialog()
-        prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
+        prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
     if not prompt:
         return
     pii = detect_pii(prompt)
@@ -1044,10 +1059,14 @@ def render_feedback(settings: dict[str, str]) -> None:
     session = st.session_state.active_session
     assessment = st.session_state.assessment or {}
     with st.container(border=True):
-        st.markdown('<p class="ct-kicker">晤談完成</p>', unsafe_allow_html=True)
+        kicker = "體驗完成" if session["mode"] == "experience" else "晤談完成"
+        st.markdown(f'<p class="ct-kicker">{kicker}</p>', unsafe_allow_html=True)
         st.markdown(f"**{session['school_name']} · {mode_label(session['mode'])}**")
         render_chips(session["selected_technique_names"])
-        st.caption("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。之後可續談同一位 AI 對話角色。")
+        if session["mode"] == "experience":
+            st.caption("你剛才擔任個案。逐字稿與示範解析已保存，之後可續談同一位 AI 諮商師。")
+        else:
+            st.caption("完整逐字稿、練習時間、學派、技巧與形成性回饋已保存。之後可續談同一位 AI 對話角色。")
     if as_bool(settings.get("student_feedback_visible"), True):
         if session["mode"] == "practice":
             if as_bool(settings.get("student_score_visible"), True) and assessment.get("total_score") is not None:
@@ -1086,19 +1105,27 @@ def render_feedback(settings: dict[str, str]) -> None:
                 for item in assessment["next_practice_focus"]:
                     st.markdown(f"- {item}")
         else:
-            st.info("體驗模式不評分學生的自我揭露或『個案表現』。以下只解析 AI 諮商師的示範。")
+            st.info("你剛才擔任個案。以下只解析 AI 示範諮商師，不評分你的自我揭露或個案表現。")
+            if assessment.get("overall_learning"):
+                st.markdown("**本次可以帶走的重點**")
+                render_quote(assessment["overall_learning"])
             if assessment.get("technique_explanations"):
+                st.markdown("**示範技巧說明**")
                 for item in assessment["technique_explanations"]:
                     name = next((t["name"] for t in get_school(session["school_id"])["techniques"] if t["id"] == item.get("technique_id")), item.get("technique_id", "技巧"))
                     with st.expander(name):
                         if item.get("ai_quote"):
-                            st.caption("AI 原句")
+                            st.caption("AI 諮商師原句")
                             render_quote(item.get("ai_quote", ""))
                         st.write(f"使用理由：{item.get('why_used', '')}")
                         st.write(f"可能效果：{item.get('possible_effect', '')}")
-            if assessment.get("overall_learning"):
-                st.write(assessment["overall_learning"])
+            questions = assessment.get("reflection_questions") or assessment.get("next_practice_focus") or []
+            if questions:
+                st.markdown("**可以想想**")
+                for item in questions:
+                    st.markdown(f"- {item}")
             if assessment.get("encouragement"):
+                st.markdown("**給觀察者的一句話**")
                 render_quote(assessment["encouragement"])
     else:
         st.info("教師目前設定為不向學生顯示 AI 回饋；本次資料仍已保存供教師檢視。")

@@ -8,6 +8,7 @@ from src.prompts import (
     build_thought_coach_prompt,
     live_coaching_enabled,
     live_plan_visible,
+    thought_coach_visible,
     turn_review_visible,
     uses_planner_llm,
 )
@@ -73,6 +74,9 @@ def test_planner_and_analyzer_json_contracts():
 def test_easy_practice_analyzer_adds_live_coaching_fields():
     assert live_coaching_enabled("practice", "初階")
     assert live_plan_visible("初階")
+    assert thought_coach_visible("practice", "初階")
+    assert not thought_coach_visible("experience", "初階")
+    assert not thought_coach_visible("practice", "中階")
     assert turn_review_visible("中階")
     assert not live_plan_visible("中階")
     assert not live_coaching_enabled("practice", "進階")
@@ -97,7 +101,8 @@ def test_experience_easy_and_medium_analyzer_fields():
         difficulty="初階",
     )
     assert "student_guide" in easy
-    assert "example_replies" in easy
+    assert '"example_replies"' not in easy
+    assert "不可預告下一句" in easy
     assert "goal" in easy
     assert "不可評分學生" in easy
     medium = build_chat_analysis_prompt(
