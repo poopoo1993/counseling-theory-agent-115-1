@@ -26,3 +26,5 @@ def test_thought_log_styles_exist() -> None:
 
     assert ".ct-thought-log" in APP_CSS
     assert ".ct-thought-item.student" in APP_CSS
+    assert "[data-testid=\"InputInstructions\"]" in APP_CSS
+    assert "span:not(:last-child)" in APP_CSS

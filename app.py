@@ -811,7 +811,7 @@ def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> N
     with st.form("coach_thought_form", clear_on_submit=True):
         thought = st.text_area(
             "想法輸入",
-            height=90,
+            height=140,
             max_chars=min(400, CONFIG.max_input_chars),
             placeholder="例如：我覺得現在該反映情緒，但怕問太快。",
             label_visibility="collapsed",

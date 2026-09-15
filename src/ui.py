@@ -641,6 +641,37 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   border: 1px solid var(--ct-line);
 }
 
+[data-testid="stVerticalBlock"]:has(.ct-thoughts) [data-testid="stTextArea"] {
+  overflow: visible;
+}
+
+[data-testid="stVerticalBlock"]:has(.ct-thoughts) [data-testid="stTextArea"] textarea {
+  min-height: 8.75rem !important;
+  padding-bottom: 0.85rem !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.ct-thoughts) [data-testid="InputInstructions"] {
+  position: relative !important;
+  inset: auto !important;
+  bottom: auto !important;
+  right: auto !important;
+  display: block;
+  width: 100%;
+  margin: 0.2rem 0 0.35rem;
+  text-align: right;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+[data-testid="stVerticalBlock"]:has(.ct-thoughts) [data-testid="InputInstructions"] > span:not(:last-child) {
+  display: none !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.ct-thoughts) [data-testid="InputInstructions"] > span::before {
+  content: none !important;
+  margin: 0 !important;
+}
+
 @media (max-width: 800px) {
   .ct-role-grid,
   .ct-meta-grid {
