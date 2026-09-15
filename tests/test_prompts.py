@@ -6,6 +6,9 @@ from src.prompts import (
     build_knowledge_block,
     build_practice_evaluator_prompt,
     live_coaching_enabled,
+    live_plan_visible,
+    turn_review_visible,
+    uses_planner_llm,
 )
 
 
@@ -61,15 +64,18 @@ def test_planner_and_analyzer_json_contracts():
     assert "hidden_or_incomplete" in analysis
     assert "next_focus" in analysis
     assert "不得發明" in analysis
-    assert "student_guide" not in analysis
-    assert "整體回饋只在晤談結束後" in analysis
+    assert '"student_guide"' not in analysis
+    assert "turn_review" in analysis
+    assert "不要輸出諮商計畫或例句" in analysis
 
 
 def test_easy_practice_analyzer_adds_live_coaching_fields():
     assert live_coaching_enabled("practice", "初階")
-    assert not live_coaching_enabled("practice", "中階")
+    assert live_plan_visible("初階")
+    assert turn_review_visible("中階")
+    assert not live_plan_visible("中階")
     assert not live_coaching_enabled("practice", "進階")
-    assert not live_coaching_enabled("experience", "初階")
+    assert live_coaching_enabled("experience", "初階")
     prompt = build_chat_analysis_prompt(
         mode="practice", school_id="cbt", selected_ids=SELECTED,
         counseling_plan={"info_targets": []}, prior_analysis=None,
@@ -77,18 +83,60 @@ def test_easy_practice_analyzer_adds_live_coaching_fields():
         difficulty="初階",
     )
     assert "student_guide" in prompt
+    assert "example_replies" in prompt
     assert "turn_review" in prompt
     assert "實作初階" in prompt
+
+
+def test_experience_easy_and_medium_analyzer_fields():
+    easy = build_chat_analysis_prompt(
+        mode="experience", school_id="cbt", selected_ids=SELECTED,
+        counseling_plan={"info_targets": []}, prior_analysis=None,
+        turns=[], latest_student_message="我最近很累。",
+        difficulty="初階",
+    )
+    assert "student_guide" in easy
+    assert "example_replies" in easy
+    assert "goal" in easy
+    assert "不可評分學生" in easy
+    medium = build_chat_analysis_prompt(
+        mode="experience", school_id="cbt", selected_ids=SELECTED,
+        counseling_plan={"info_targets": []}, prior_analysis=None,
+        turns=[], latest_student_message="我最近很累。",
+        difficulty="中階",
+    )
+    assert '"student_guide"' not in medium
+    assert '"example_replies"' not in medium
+    assert "turn_review" in medium
+    hard = build_chat_analysis_prompt(
+        mode="experience", school_id="cbt", selected_ids=SELECTED,
+        counseling_plan={"info_targets": []}, prior_analysis=None,
+        turns=[], latest_student_message="我最近很累。",
+        difficulty="進階",
+    )
+    assert '"student_guide"' not in hard
+    assert "turn_review" not in hard
+    assert "進階的整體回饋" in hard
+
+
+def test_planner_used_for_practice_and_hard_experience_only():
+    assert uses_planner_llm("practice", "初階")
+    assert uses_planner_llm("practice", "進階")
+    assert not uses_planner_llm("experience", "初階")
+    assert not uses_planner_llm("experience", "中階")
+    assert uses_planner_llm("experience", "進階")
 
 
 def test_analysis_for_chatbot_strips_student_visible_fields():
     hidden = analysis_for_chatbot({
         "next_focus": "簡短回答",
         "student_guide": "試試反映情緒",
+        "example_replies": ["你聽起來很累。"],
         "turn_review": {"verdict": "合宜", "comment": "這句有抓住感受"},
     })
     assert hidden["next_focus"] == "簡短回答"
     assert "student_guide" not in hidden
+    assert "example_replies" not in hidden
     assert "turn_review" not in hidden
 
 

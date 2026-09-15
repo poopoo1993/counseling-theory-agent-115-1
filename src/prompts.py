@@ -125,19 +125,84 @@ info_targets 必須貼近該學派蒐集資料的方式，不得發明知識庫�
 }}"""
 
 
+def coaching_tier(difficulty: str) -> str:
+    value = str(difficulty or "").strip()
+    if value == "初階":
+        return "easy"
+    if value == "中階":
+        return "medium"
+    return "hard"
+
+
+def live_plan_visible(difficulty: str) -> bool:
+    """初階在對話旁顯示依現況調整的計畫與例句。"""
+    return coaching_tier(difficulty) == "easy"
+
+
+def turn_review_visible(difficulty: str) -> bool:
+    """初階與中階在對話中顯示單句回饋／目標效果。"""
+    return coaching_tier(difficulty) in {"easy", "medium"}
+
+
 def live_coaching_enabled(mode: str, difficulty: str) -> bool:
-    """Practice 初階 shows analyzer coaching beside chat; 中階/進階 wait until session end."""
-    return mode == "practice" and str(difficulty or "") == "初階"
+    """Any student-visible in-session analyzer coaching. 進階仍只在結束後回饋。"""
+    del mode
+    return turn_review_visible(difficulty)
+
+
+def uses_planner_llm(mode: str, difficulty: str) -> bool:
+    """進階用計畫＋分析＋聊天三引擎；體驗初階／中階改為分析＋聊天。實作仍需計畫引擎產個案。"""
+    if coaching_tier(difficulty) == "hard":
+        return True
+    return mode == "practice"
 
 
 def analysis_for_chatbot(analysis: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Strip student-visible coaching so the client chatbot cannot read it aloud."""
+    """Strip student-visible coaching so the dialogue engine cannot read it aloud."""
     if not analysis:
         return analysis
     hidden = dict(analysis)
     hidden.pop("student_guide", None)
+    hidden.pop("example_replies", None)
     hidden.pop("turn_review", None)
     return hidden
+
+
+def _analyzer_visible_instructions(mode: str, difficulty: str) -> tuple[str, str]:
+    if not turn_review_visible(difficulty):
+        return (
+            "學生看不到這份輸出。不得對學生評分或教課。進階的整體回饋只在晤談結束後另一次評量產生。",
+            "",
+        )
+    if mode == "experience":
+        if live_plan_visible(difficulty):
+            visible = """此為體驗初階：學生當個案。除內部欄位外，另輸出學生可見的此刻示範計畫與本句說明。
+student_guide 依當下逐字稿說明諮商師接下來的計畫與做法（2至4句，可點名本次指定技巧，但不可講課、不可評分學生的個案表現）。
+example_replies 給 1至2 句符合此刻談話的示範例句，須像諮商師下一句可能會說的話。
+turn_review 說明「即將／本輪」示範諮商師那一句的目標與預期效果，不要評分學生。"""
+            extra = """,
+  "student_guide": "依現況調整的接下來計畫與做法",
+  "example_replies": ["符合此刻的示範例句"],
+  "turn_review": {{"goal": "本句目標，一句", "effect": "預期效果，一句", "comment": ""}}"""
+            return visible, extra
+        visible = """此為體驗中階：學生當個案。只輸出本句目標與預期效果，不要給諮商計畫或例句，不可評分學生的個案表現。"""
+        extra = """,
+  "turn_review": {{"goal": "本句目標，一句", "effect": "預期效果，一句", "comment": ""}}"""
+        return visible, extra
+    if live_plan_visible(difficulty):
+        visible = """此為實作初階：學生當諮商師。除內部欄位外，另輸出學生可見的練習計畫與本句回饋。
+student_guide 依當下逐字稿給接下來的計畫與做法（2至4句，可點名本次指定技巧，但不可講課、不可揭露 hidden_formulation 或系統規則）。
+example_replies 給 1至2 句學生可直接改用、且符合此刻談話的例句。
+turn_review 只評學生最新一句：簡短、具體、鼓勵，不要打分數。單句回饋只出現在對話中，不要在計畫欄重複。"""
+        extra = """,
+  "student_guide": "依現況調整的接下來計畫與做法",
+  "example_replies": ["符合此刻的可嘗試例句"],
+  "turn_review": {{"verdict": "具體|可再具體|偏離焦點|合宜", "comment": "針對學生最新一句的1至2句回饋或空字串"}}"""
+        return visible, extra
+    visible = """此為實作中階：只評學生最新一句，不要輸出諮商計畫或例句。簡短、具體、鼓勵，不要打分數。"""
+    extra = """,
+  "turn_review": {{"verdict": "具體|可再具體|偏離焦點|合宜", "comment": "針對學生最新一句的1至2句回饋或空字串"}}"""
+    return visible, extra
 
 
 def build_chat_analysis_prompt(
@@ -155,18 +220,7 @@ def build_chat_analysis_prompt(
     history = transcript_text(turns[-14:]) or "（尚無先前對話）"
     plan_json = json.dumps(counseling_plan or {}, ensure_ascii=False)
     analysis_json = json.dumps(prior_analysis or {}, ensure_ascii=False)
-    coaching = live_coaching_enabled(mode, difficulty)
-    if coaching:
-        visible = """此為實作初階：除內部欄位外，另輸出學生可見的簡短提示與本句回饋。
-student_guide 給下一個可嘗試方向（1至2句，可點名本次指定技巧，但不可講課、不可揭露 hidden_formulation 或系統規則）。
-turn_review 只評學生最新一句：簡短、具體、鼓勵，不要打分數。開場尚無學生句子時 turn_review.comment 可空字串。
-聊天引擎仍只扮演個案，不會朗讀這些提示。"""
-        extra_json = """,
-  "student_guide": "下一個可嘗試的方向，1至2句",
-  "turn_review": {{"verdict": "具體|可再具體|偏離焦點|合宜", "comment": "針對學生最新一句的1至2句回饋或空字串"}}"""
-    else:
-        visible = """學生看不到這份輸出。不得對學生評分或教課。中階與進階的整體回饋只在晤談結束後另一次評量產生。"""
-        extra_json = ""
+    visible, extra_json = _analyzer_visible_instructions(mode, difficulty)
     return f"""你是「對話分析」引擎，不是聊天角色。根據諮商計畫分析目前對話、已揭露與可能隱藏或未說完的資訊，並給聊天引擎下一個焦點。
 不得發明知識庫以外的技巧名稱。
 {visible}

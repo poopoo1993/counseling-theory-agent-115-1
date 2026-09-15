@@ -60,6 +60,20 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   padding-right: 1.5rem;
 }
 
+[data-testid="stBottom"],
+[data-testid="stBottomBlockContainer"] {
+  max-width: __MAX_WIDTH__ !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  width: 100%;
+}
+
+[data-testid="stBottomBlockContainer"] {
+  padding-left: 1.5rem !important;
+  padding-right: 1.5rem !important;
+  background: var(--ct-bg) !important;
+}
+
 [data-testid="stSidebar"] {
   background: #efebe3;
   border-right: 1px solid var(--ct-line);
@@ -193,6 +207,9 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 
 [data-testid="stChatInput"] {
   background: transparent;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 [data-testid="stChatInput"] textarea {
@@ -565,10 +582,17 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   line-height: 1.55;
 }
 
-.ct-coach-empty {
-  color: var(--ct-muted);
-  font-size: 0.88rem;
-  margin: 0;
+.ct-coach-example {
+  margin: 0 0 0.45rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--ct-sage-soft);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.ct-coach-example:last-child {
+  margin-bottom: 0;
 }
 
 @media (max-width: 800px) {
@@ -622,6 +646,14 @@ def apply_theme(density: str = "student") -> None:
         [data-testid="stAppViewContainer"] > .main,
         [data-testid="stMain"] {
           margin-left: 0 !important;
+        }
+        """
+    if density == "coach":
+        extra += """
+        [data-testid="stBottomBlockContainer"] {
+          max-width: min(100%, 44rem) !important;
+          margin-left: auto !important;
+          margin-right: auto !important;
         }
         """
     css = APP_CSS.replace("__MAX_WIDTH__", widths.get(density, widths["student"])) + extra
@@ -773,28 +805,31 @@ def render_empty_state(title: str, body: str) -> None:
     )
 
 
-def render_coaching_panel(guide: str, latest_review: Mapping[str, Any] | None) -> None:
+def render_coaching_panel(
+    *,
+    mode: str,
+    guide: str,
+    examples: Sequence[str] | None = None,
+) -> None:
     st = _st()
     guide_text = str(guide or "").strip()
-    verdict = str((latest_review or {}).get("verdict") or "").strip()
-    comment = str((latest_review or {}).get("comment") or "").strip()
-    review_body = "：".join(part for part in (verdict, comment) if part)
+    example_items = [str(item).strip() for item in (examples or []) if str(item).strip()]
+    title = "此刻示範計畫" if mode == "experience" else "初階練習提示"
     guide_html = (
         f"<p>{escape_html(guide_text)}</p>"
         if guide_text
-        else '<p class="ct-coach-empty">送出一句回應後，這裡會出現簡短方向提示。</p>'
+        else '<p class="ct-coach-empty">送出一句後，這裡會依此刻談話更新計畫與做法。</p>'
     )
-    review_html = (
-        f"<p>{escape_html(review_body)}</p>"
-        if review_body
-        else '<p class="ct-coach-empty">每一句諮商回應都會有一句即時回饋。</p>'
-    )
+    if example_items:
+        example_html = "".join(f"<p class=\"ct-coach-example\">{escape_html(item)}</p>" for item in example_items)
+    else:
+        example_html = '<p class="ct-coach-empty">符合此刻談話的例句會顯示在這裡。</p>'
     st.markdown(
         f"""
         <div class="ct-coach">
-          <p class="ct-kicker">初階練習提示</p>
-          <div class="ct-coach-block"><span>下一步可嘗試</span>{guide_html}</div>
-          <div class="ct-coach-block"><span>本句回饋</span>{review_html}</div>
+          <p class="ct-kicker">{escape_html(title)}</p>
+          <div class="ct-coach-block"><span>接下來的計畫與做法</span>{guide_html}</div>
+          <div class="ct-coach-block"><span>符合此刻的例句</span>{example_html}</div>
         </div>
         """,
         unsafe_allow_html=True,

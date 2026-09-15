@@ -36,7 +36,9 @@ from src.prompts import (
     build_practice_evaluator_prompt,
     build_snapshot_prompt,
     case_data_from_plan,
-    live_coaching_enabled,
+    live_plan_visible,
+    turn_review_visible,
+    uses_planner_llm,
 )
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
 from src.session_service import finish_session, new_session, new_turn
@@ -485,7 +487,9 @@ def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None)
         return
     comment = str(review.get("comment", "")).strip()
     verdict = str(review.get("verdict", "")).strip()
-    if not comment and not verdict:
+    goal = str(review.get("goal", "")).strip()
+    effect = str(review.get("effect", "")).strip()
+    if not comment and not verdict and not goal and not effect:
         return
     history = list(st.session_state.get("turn_reviews") or [])
     history = [item for item in history if int(item.get("turn_index") or 0) != student_turn_index]
@@ -493,6 +497,8 @@ def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None)
         "turn_index": student_turn_index,
         "verdict": verdict,
         "comment": comment,
+        "goal": str(review.get("goal", "")).strip(),
+        "effect": str(review.get("effect", "")).strip(),
     })
     st.session_state.turn_reviews = history
 
@@ -500,7 +506,7 @@ def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None)
 def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None:
     session = st.session_state.active_session
     turns = st.session_state.prior_turns_context + st.session_state.turns
-    coaching = live_coaching_enabled(session["mode"], str(session.get("difficulty", "")))
+    show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
     # 新模擬開場沒有學生話語，不必先打分析引擎，避免一次連發三個 Gemini 請求。
     should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
     if should_analyze:
@@ -515,7 +521,7 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
             latest_student_message=latest_student_message,
             difficulty=str(session.get("difficulty", "")),
         )
-        if coaching and latest_student_message:
+        if show_turn_review and session["mode"] == "practice" and latest_student_message:
             student_index = next(
                 (
                     int(turn["turn_index"])
@@ -548,22 +554,29 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
         timezone=CONFIG.timezone,
         latency_ms=latency,
     ))
+    if show_turn_review and session["mode"] == "experience" and st.session_state.chat_analysis:
+        record_turn_review(len(st.session_state.turns), st.session_state.chat_analysis)
     persist_thread_state("in_progress")
 
 
 def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
     validate_selected_techniques(school_id, selected_ids)
     service = gemini()
-    plan = create_counseling_plan(
-        service,
-        mode=mode,
-        school_id=school_id,
-        selected_ids=selected_ids,
-        theme=theme,
-        difficulty=difficulty,
-    )
-    case_data = case_data_from_plan(plan) if mode == "practice" else None
-    case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
+    if uses_planner_llm(mode, difficulty):
+        plan = create_counseling_plan(
+            service,
+            mode=mode,
+            school_id=school_id,
+            selected_ids=selected_ids,
+            theme=theme,
+            difficulty=difficulty,
+        )
+        case_data = case_data_from_plan(plan) if mode == "practice" else None
+        case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
+    else:
+        plan = {"mode": mode, "school_id": school_id}
+        case_data = None
+        case_id = "student_topic"
     session = new_session(
         participant_id=st.session_state.participant_id,
         mode=mode,
@@ -619,20 +632,21 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
     st.session_state.assessment = None
-    st.session_state.counseling_plan = create_counseling_plan(
-        service,
-        mode=mode,
-        school_id=school_id,
-        selected_ids=selected_ids,
-        theme="續談上次議題",
-        difficulty=difficulty,
-        prior_snapshot=st.session_state.continuation_snapshot,
-        prior_plan=st.session_state.counseling_plan,
-        prior_analysis=st.session_state.chat_analysis,
-    )
-    session["model_name"] = service.model_name
-    if mode == "practice":
-        st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
+    if uses_planner_llm(mode, difficulty):
+        st.session_state.counseling_plan = create_counseling_plan(
+            service,
+            mode=mode,
+            school_id=school_id,
+            selected_ids=selected_ids,
+            theme="續談上次議題",
+            difficulty=difficulty,
+            prior_snapshot=st.session_state.continuation_snapshot,
+            prior_plan=st.session_state.counseling_plan,
+            prior_analysis=st.session_state.chat_analysis,
+        )
+        session["model_name"] = service.model_name
+        if mode == "practice":
+            st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
     STORE.start_session(session)
     persist_thread_state("in_progress")
     generate_ai_turn(is_opening=True)
@@ -676,9 +690,18 @@ def new_practice_panel(settings: dict[str, str]) -> None:
         difficulty = st.select_slider("案例難度", ["初階", "中階", "進階"], value="中階")
         if mode == "practice":
             if difficulty == "初階":
-                st.caption("初階會在對話旁提供即時練習提示，並對你每一句諮商回應給簡短回饋。")
+                st.caption("初階會在旁邊顯示依此刻談話調整的計畫與例句；你的每一句諮商回應會在對話中給簡短回饋。")
+            elif difficulty == "中階":
+                st.caption("中階會在對話中給單句回饋，不顯示諮商計畫。")
             else:
-                st.caption("中階與進階不會在對話中提示；整體回饋在結束晤談後一次給出。")
+                st.caption("進階不會在對話中提示；整體回饋在結束晤談後一次給出。")
+        else:
+            if difficulty == "初階":
+                st.caption("初階會在旁邊顯示諮商師此刻的計畫、做法與例句；AI 每一句會標出目標與預期效果。")
+            elif difficulty == "中階":
+                st.caption("中階只在對話中標出 AI 每一句的目標與預期效果，不顯示諮商計畫。")
+            else:
+                st.caption("進階不會在對話中提示；結束後再解析 AI 示範。")
     ready = len(selected) == 3
     if st.button("開始新的模擬", type="primary", use_container_width=True, disabled=not ready):
         if len(selected) != 3:
@@ -761,9 +784,31 @@ def render_chat() -> None:
     target_minutes = int(settings.get(target_key, "8" if session["mode"] == "experience" else "15") or 0)
     elapsed = datetime.now(ZoneInfo(CONFIG.timezone)) - datetime.fromisoformat(session["started_at"])
     elapsed_min = max(0, int(elapsed.total_seconds() // 60))
-    coaching = live_coaching_enabled(session["mode"], str(session.get("difficulty", "")))
+    show_plan = live_plan_visible(str(session.get("difficulty", "")))
+    show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
     analysis = st.session_state.chat_analysis or {}
     reviews = {int(item.get("turn_index") or 0): item for item in (st.session_state.get("turn_reviews") or [])}
+
+    def render_inline_review(role: str, turn: dict[str, Any]) -> None:
+        if not show_turn_review:
+            return
+        review = reviews.get(int(turn.get("turn_index") or 0))
+        if not review:
+            return
+        if session["mode"] == "practice" and role == "student_counselor":
+            verdict = review.get("verdict") or "回饋"
+            comment = review.get("comment") or ""
+            st.caption(f"即時回饋 · {verdict}" + (f"：{comment}" if comment else ""))
+        elif session["mode"] == "experience" and role == "ai_counselor":
+            goal = str(review.get("goal") or "").strip()
+            effect = str(review.get("effect") or "").strip()
+            parts = []
+            if goal:
+                parts.append(f"目標：{goal}")
+            if effect:
+                parts.append(f"預期效果：{effect}")
+            if parts:
+                st.caption("本句說明 · " + " · ".join(parts))
 
     def render_dialog() -> None:
         with st.container(border=True):
@@ -772,7 +817,7 @@ def render_chat() -> None:
                 st.markdown('<p class="ct-kicker">' + mode_label(session["mode"]) + "</p>", unsafe_allow_html=True)
                 st.markdown(f"**{session['school_name']}**")
                 render_chips(session["selected_technique_names"])
-                extra = " · 初階即時提示開啟" if coaching else ""
+                extra = " · 初階即時計畫開啟" if show_plan else (" · 單句說明開啟" if show_turn_review else "")
                 st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
             with action_col:
                 if st.button("結束晤談", use_container_width=True):
@@ -783,25 +828,27 @@ def render_chat() -> None:
             with st.chat_message("user" if role.startswith("student") else "assistant"):
                 st.caption(ROLE_LABELS.get(role, role))
                 st.write(turn["content_raw"])
-                if coaching and role == "student_counselor":
-                    review = reviews.get(int(turn.get("turn_index") or 0))
-                    if review:
-                        verdict = review.get("verdict") or "回饋"
-                        comment = review.get("comment") or ""
-                        st.caption(f"即時回饋 · {verdict}" + (f"：{comment}" if comment else ""))
+                render_inline_review(role, turn)
         st.caption("可在括弧中輸入非語言訊息，例如（語氣放緩）、（停頓數秒）。")
 
-    if coaching:
+    prompt = None
+    if show_plan:
         chat_col, coach_col = st.columns([1.55, 1], gap="large")
         with chat_col:
             render_dialog()
+            prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
         with coach_col:
-            latest = next(iter(reversed(st.session_state.get("turn_reviews") or [])), None)
-            render_coaching_panel(analysis.get("student_guide", ""), latest)
+            examples = analysis.get("example_replies")
+            if not isinstance(examples, list):
+                examples = []
+            render_coaching_panel(
+                mode=session["mode"],
+                guide=str(analysis.get("student_guide", "")),
+                examples=examples,
+            )
     else:
         render_dialog()
-
-    prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
+        prompt = st.chat_input("輸入你的回應…", max_chars=CONFIG.max_input_chars)
     if not prompt:
         return
     pii = detect_pii(prompt)
@@ -1038,7 +1085,7 @@ def student_page() -> None:
         session = st.session_state.active_session or {}
         apply_theme(
             "coach"
-            if live_coaching_enabled(session.get("mode", ""), str(session.get("difficulty", "")))
+            if live_plan_visible(str(session.get("difficulty", "")))
             else "chat"
         )
         show_online_people()
