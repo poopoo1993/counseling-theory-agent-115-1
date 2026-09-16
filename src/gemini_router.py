@@ -81,6 +81,14 @@ def keep_gemini_router_alive() -> None:
     _gemini_router(jobs=[], default=None, key=_COMPONENT_KEY)
 
 
+def _render_router(jobs: Sequence[Mapping[str, Any]]) -> Any:
+    st = _st()
+    if st.session_state.get("_gemini_router_mounted"):
+        raise GeminiRouterPending()
+    st.session_state["_gemini_router_mounted"] = True
+    return _gemini_router(jobs=list(jobs), default=None, key=_COMPONENT_KEY)
+
+
 def run_browser_jobs(service: GeminiService, jobs: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     st = _st()
     prepared: list[dict[str, Any]] = []
@@ -105,8 +113,7 @@ def run_browser_jobs(service: GeminiService, jobs: Sequence[Mapping[str, Any]]) 
     cache = _results()
     pending = [job for job in prepared if job["request_id"] not in cache]
     if pending:
-        st.session_state["_gemini_router_mounted"] = True
-        raw = _gemini_router(jobs=pending, default=None, key=_COMPONENT_KEY)
+        raw = _render_router(pending)
         received = _normalize_results(raw)
         missing = [job["request_id"] for job in pending if job["request_id"] not in received]
         if missing:

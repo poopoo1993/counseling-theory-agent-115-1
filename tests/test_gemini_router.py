@@ -64,6 +64,37 @@ def test_generate_via_browser_returns_cached_call_id(monkeypatch):
     assert service.last_latency_ms == 12
 
 
+def test_run_browser_jobs_renders_iframe_only_once_per_run(monkeypatch):
+    import src.gemini_router as router
+
+    state = {"_gemini_router_mounted": False}
+    dummy_st = SimpleNamespace(session_state=state)
+    calls = {"n": 0}
+
+    def fake_component(**kwargs):
+        calls["n"] += 1
+        jobs = kwargs["jobs"]
+        return {
+            "results": [{
+                "request_id": jobs[0]["request_id"],
+                "text": "plan-ok",
+                "model": "gemini-flash-latest",
+                "latency_ms": 3,
+                "error": "",
+            }]
+        }
+
+    monkeypatch.setattr(router, "_st", lambda: dummy_st)
+    monkeypatch.setattr(router, "_gemini_router", fake_component)
+    assert run_browser_jobs(_service(), [{"request_id": "plan-1", "prompt": "p"}])["plan-1"] == "plan-ok"
+    try:
+        run_browser_jobs(_service(), [{"request_id": "chat-1", "prompt": "c"}])
+    except GeminiRouterPending:
+        assert calls["n"] == 1
+        return
+    raise AssertionError("expected GeminiRouterPending instead of a second iframe")
+
+
 def test_run_browser_jobs_batches_and_ignores_stale_results(monkeypatch):
     import src.gemini_router as router
 
