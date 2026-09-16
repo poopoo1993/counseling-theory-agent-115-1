@@ -233,3 +233,163 @@ def test_choose_store_backend_uses_sheets_when_secrets_present():
     assert require_sheets_enabled(required_only)
     assert choose_store_backend(required_only) == "sheets"
     assert not sheets_secrets_present(required_only)
+
+
+class _FakeAPIError(Exception):
+    def __init__(self, status_code=429, retry_after=None):
+        self.response = type("Response", (), {
+            "status_code": status_code,
+            "headers": {"Retry-After": retry_after} if retry_after else {},
+        })()
+        super().__init__(f"{status_code} quota")
+
+
+class _FakeWorksheet:
+    def __init__(self, title, headers):
+        self.title = title
+        self.headers = list(headers)
+        self.rows = []
+        self.row_values_calls = 0
+        self.update_calls = 0
+
+    def row_values(self, row):
+        self.row_values_calls += 1
+        return list(self.headers) if row == 1 else []
+
+    def append_row(self, values, value_input_option="RAW"):
+        if not self.headers:
+            self.headers = [str(item) for item in values]
+            return
+        self.rows.append([str(item) for item in values])
+
+    def freeze(self, rows=None, cols=None):
+        return None
+
+    def update(self, values=None, range_name=None):
+        self.update_calls += 1
+        if values:
+            self.headers = [str(item) for item in values[0]]
+
+    def get_all_records(self, default_blank=""):
+        records = []
+        for row in self.rows:
+            item = {}
+            for index, header in enumerate(self.headers):
+                item[header] = row[index] if index < len(row) else default_blank
+            records.append(item)
+        return records
+
+    def delete_rows(self, index: int):
+        del self.rows[index - 2]
+
+
+class _FakeBook:
+    def __init__(self, sheets):
+        self._sheets = list(sheets)
+        self.worksheets_calls = 0
+        self.batch_gets = 0
+
+    def worksheets(self):
+        self.worksheets_calls += 1
+        return list(self._sheets)
+
+    def add_worksheet(self, title, rows, cols):
+        ws = _FakeWorksheet(title, [])
+        self._sheets.append(ws)
+        return ws
+
+    def values_batch_get(self, ranges, params=None):
+        self.batch_gets += 1
+        blocks = []
+        for rng in ranges:
+            name = rng.split("!")[0].strip("'")
+            ws = next(item for item in self._sheets if item.title == name)
+            blocks.append({"range": rng, "values": [ws.headers] if ws.headers else []})
+        return {"valueRanges": blocks}
+
+
+def _fake_sheets_store(headers_ok: bool = True):
+    from src.data_store import SCHEMAS, GoogleSheetsStore
+
+    sheets = [
+        _FakeWorksheet(name, list(headers) if headers_ok else [])
+        for name, headers in SCHEMAS.items()
+    ]
+    book = _FakeBook(sheets)
+    store = GoogleSheetsStore.__new__(GoogleSheetsStore)
+    store.book = book
+    store.timezone = "Asia/Taipei"
+    store.worksheets = {}
+    store.ensure_schema()
+    return store, book
+
+
+def test_retry_sheets_call_retries_quota_then_succeeds(monkeypatch):
+    from src.data_store import is_transient_sheets_error, retry_sheets_call
+
+    sleeps = []
+    monkeypatch.setattr("src.data_store.time.sleep", sleeps.append)
+    assert is_transient_sheets_error(_FakeAPIError(429))
+    state = {"n": 0}
+
+    def flaky():
+        state["n"] += 1
+        if state["n"] < 3:
+            raise _FakeAPIError(429)
+        return "ok"
+
+    assert retry_sheets_call(flaky) == "ok"
+    assert state["n"] == 3
+    assert sleeps
+
+
+def test_public_store_error_message_hides_api_details():
+    from src.data_store import SHEETS_USER_ERROR, public_store_error_message
+
+    message = public_store_error_message(_FakeAPIError(429))
+    assert message == SHEETS_USER_ERROR
+    assert "quota" not in message.lower()
+
+
+def test_google_sheets_ensure_schema_batches_and_skips_second_pass():
+    store, book = _fake_sheets_store()
+    assert book.batch_gets == 1
+    assert book.worksheets_calls == 1
+    assert all(ws.row_values_calls == 0 for ws in book._sheets)
+    store.ensure_schema()
+    store.ensure_schema()
+    assert book.worksheets_calls == 1
+    assert book.batch_gets == 1
+
+
+def test_google_sheets_ensure_schema_adds_missing_column():
+    from src.data_store import SCHEMAS
+
+    store, book = _fake_sheets_store()
+    sessions = store.worksheets["Sessions"]
+    sessions.headers = [item for item in SCHEMAS["Sessions"] if item != "research_consent"]
+    store._schema_ready = False
+    store.worksheets = {}
+    store.ensure_schema()
+    assert "research_consent" in sessions.headers
+    assert sessions.update_calls == 1
+
+
+def test_seed_whitelist_does_not_rewrite_existing_teacher():
+    from src.data_store import MemoryStore
+
+    store = MemoryStore("Asia/Taipei")
+    store.seed_whitelist(("student@hcu.edu.tw",), ("teacher@hcu.edu.tw",))
+    calls = {"n": 0}
+    original = store._upsert_by_key
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    store._upsert_by_key = wrapped
+    store._whitelist_seed_key = None
+    store.seed_whitelist(("student@hcu.edu.tw",), ("teacher@hcu.edu.tw",))
+    assert calls["n"] == 0
+    assert store.is_whitelisted("student@hcu.edu.tw")
+    assert store.get_whitelist_role("teacher@hcu.edu.tw") == "teacher"

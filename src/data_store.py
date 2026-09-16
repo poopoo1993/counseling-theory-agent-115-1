@@ -10,13 +10,20 @@ import binascii
 import hashlib
 import json
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-from .config import DEFAULT_LOGIN_ALLOWLIST, DEFAULT_SETTINGS, DEFAULT_TEACHER_EMAILS
+from .config import (
+    DEFAULT_ACCOUNT_PASSWORDS,
+    DEFAULT_LOGIN_ALLOWLIST,
+    DEFAULT_SETTINGS,
+    DEFAULT_TEACHER_EMAILS,
+)
 
 
 SCHEMAS: dict[str, list[str]] = {
@@ -128,6 +135,95 @@ def choose_store_backend(secrets: Mapping[str, Any]) -> str:
     return "sqlite"
 
 
+_TRANSIENT_SHEETS_TOKENS = (
+    "429",
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "resource_exhausted",
+    "backenderror",
+    "internal error",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "unavailable",
+)
+
+SHEETS_USER_ERROR = (
+    "無法讀取 Google 試算表，因此登入畫面無法開啟。"
+    "常見原因是試算表 API 暫時忙碌，或一分鐘內請求次數過多。"
+    "請等待約一分鐘後重新整理。"
+    "若持續失敗，請確認試算表已分享給服務帳戶 Email（編輯者），且已啟用 Google Sheets API。"
+)
+
+SERVICE_ACCOUNT_USER_ERROR = (
+    "Google 服務帳戶金鑰格式不正確，無法連線試算表。"
+    "請檢查 Streamlit Secrets 的 GOOGLE_SERVICE_ACCOUNT_JSON。"
+)
+
+
+def is_transient_sheets_error(exc: BaseException) -> bool:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)
+    try:
+        if int(status) in {429, 500, 502, 503, 504}:
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(exc).lower()
+    return any(token in text for token in _TRANSIENT_SHEETS_TOKENS)
+
+
+def sheets_retry_delay(exc: BaseException, fallback: float) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    try:
+        if raw is not None:
+            return min(max(float(raw), 0.5), 16.0)
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
+def retry_sheets_call(operation: Callable[[], Any], attempts: int = 5) -> Any:
+    delay = 1.0
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts - 1 or not is_transient_sheets_error(exc):
+                raise
+            time.sleep(sheets_retry_delay(exc, delay))
+            delay = min(delay * 2, 8.0)
+    assert last_exc is not None
+    raise last_exc
+
+
+def public_store_error_message(exc: BaseException) -> str:
+    raw = str(exc).strip()
+    if any("\u4e00" <= ch <= "\u9fff" for ch in raw):
+        return raw
+    if isinstance(exc, (
+        ServiceAccountFieldsMissingError,
+        PrivateKeyIncompleteError,
+        PrivateKeyEncodingError,
+        PrivateKeyParseError,
+    )):
+        return SERVICE_ACCOUNT_USER_ERROR
+    text = f"{type(exc).__name__} {exc}".lower()
+    if any(token in text for token in ("apierror", "gspread", "spreadsheet", "quota", "429", "sheets")):
+        return SHEETS_USER_ERROR
+    return (
+        "資料儲存初始化失敗，因此登入畫面無法開啟。"
+        "請稍候再重新整理；若持續發生，請到 Streamlit Manage app 查看 logs。"
+    )
+
+
 class ServiceAccountFieldsMissingError(ValueError):
     """Required service-account fields are absent."""
 
@@ -227,16 +323,36 @@ class WhitelistMixin:
             for item in (*login_allowlist, *DEFAULT_LOGIN_ALLOWLIST)
             if str(item).strip()
         ))
+        fingerprint = (teachers, allow)
+        if getattr(self, "_whitelist_seed_key", None) == fingerprint:
+            return
+        rows = {
+            str(item.get("email", "")).strip().lower(): item
+            for item in self.all_records("whitelist")
+            if str(item.get("email", "")).strip()
+        }
         for email in teachers:
-            existing = self._whitelist_row(email)
+            existing = rows.get(email)
+            if existing and str(existing.get("role", "")).strip().lower() == "teacher":
+                continue
             enabled = _flag_enabled(existing.get("enabled", "true")) if existing else True
             self.upsert_whitelist(email, "teacher", enabled)
+            rows[email] = self._whitelist_row(email) or {"email": email, "role": "teacher"}
         for email in allow:
-            if email in teachers or self._whitelist_row(email):
+            if email in teachers or email in rows:
                 continue
             self.upsert_whitelist(email, "student", True)
+            rows[email] = {"email": email, "role": "student"}
         from .auth import seed_default_account_passwords
-        seed_default_account_passwords(self)
+        needs_password = False
+        for email in DEFAULT_ACCOUNT_PASSWORDS:
+            row = rows.get(str(email).strip().lower())
+            if row is not None and not str(row.get("password_hash", "")).strip():
+                needs_password = True
+                break
+        if needs_password:
+            seed_default_account_passwords(self)
+        self._whitelist_seed_key = fingerprint
 
     def list_whitelist(self) -> list[dict[str, Any]]:
         rows = self.all_records("whitelist")
@@ -401,7 +517,7 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
             client = gspread.service_account_from_dict(credentials)
         except ValueError:
             raise PrivateKeyParseError from None
-        self.book = client.open_by_key(spreadsheet_id)
+        self.book = retry_sheets_call(lambda: client.open_by_key(spreadsheet_id))
         self.timezone = timezone
         self.worksheets: dict[str, Any] = {}
         self.ensure_schema()
@@ -415,53 +531,90 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
         return datetime.now(ZoneInfo(self.timezone)).isoformat(timespec="seconds")
 
     def ensure_schema(self) -> None:
-        existing = {ws.title: ws for ws in self.book.worksheets()}
+        if getattr(self, "_schema_ready", False) and set(self.worksheets) >= set(SCHEMAS):
+            return
+        existing = {ws.title: ws for ws in retry_sheets_call(self.book.worksheets)}
+        present = [name for name in SCHEMAS if name in existing]
+        headers_by_name = self._header_rows(existing, present)
         for name, headers in SCHEMAS.items():
             ws = existing.get(name)
             if ws is None:
-                ws = self.book.add_worksheet(title=name, rows=5000, cols=max(20, len(headers) + 2))
-                ws.append_row(headers, value_input_option="RAW")
-                ws.freeze(rows=1)
+                ws = retry_sheets_call(partial(
+                    self.book.add_worksheet,
+                    title=name,
+                    rows=5000,
+                    cols=max(20, len(headers) + 2),
+                ))
+                retry_sheets_call(partial(ws.append_row, headers, value_input_option="RAW"))
+                retry_sheets_call(partial(ws.freeze, rows=1))
+                existing[name] = ws
             else:
-                current = ws.row_values(1)
+                current = headers_by_name.get(name) or []
                 if not current:
-                    ws.append_row(headers, value_input_option="RAW")
-                    ws.freeze(rows=1)
+                    retry_sheets_call(partial(ws.append_row, headers, value_input_option="RAW"))
+                    retry_sheets_call(partial(ws.freeze, rows=1))
                 elif current != headers:
                     missing = [h for h in headers if h not in current]
                     if missing:
-                        ws.update(values=[current + missing], range_name="A1")
+                        filled = current + missing
+                        retry_sheets_call(partial(ws.update, values=[filled], range_name="A1"))
             self.worksheets[name] = ws
         settings = self.all_records("Settings")
         if not settings:
             for key, value in DEFAULT_SETTINGS.items():
                 self.append("Settings", {"key": key, "value": value, "updated_at": self.now(), "updated_by": "system"})
+        self._schema_ready = True
+
+    def _header_rows(self, sheets: Mapping[str, Any], names: Sequence[str]) -> dict[str, list[str]]:
+        if not names:
+            return {}
+        book = self.book
+        if hasattr(book, "values_batch_get"):
+            ranges = [f"'{name}'!1:1" for name in names]
+            payload = retry_sheets_call(lambda: book.values_batch_get(ranges))
+            blocks = payload.get("valueRanges") if isinstance(payload, Mapping) else None
+            if isinstance(blocks, list) and len(blocks) == len(names):
+                result: dict[str, list[str]] = {}
+                for name, block in zip(names, blocks):
+                    values = block.get("values") if isinstance(block, Mapping) else None
+                    row = values[0] if values else []
+                    result[name] = [str(cell) for cell in row]
+                return result
+        result = {}
+        for name in names:
+            row = retry_sheets_call(partial(sheets[name].row_values, 1))
+            result[name] = [str(cell) for cell in row]
+        return result
 
     def append(self, sheet: str, record: Mapping[str, Any]) -> None:
         headers = SCHEMAS[sheet]
         values = [json_cell(record.get(key, "")) for key in headers]
-        self.worksheets[sheet].append_row(values, value_input_option="RAW")
+        retry_sheets_call(partial(
+            self.worksheets[sheet].append_row, values, value_input_option="RAW"
+        ))
 
     def all_records(self, sheet: str) -> list[dict[str, Any]]:
-        return self.worksheets[sheet].get_all_records(default_blank="")
+        return retry_sheets_call(partial(
+            self.worksheets[sheet].get_all_records, default_blank=""
+        ))
 
     def _upsert_by_key(self, sheet: str, key: str, value: str, record: Mapping[str, Any]) -> None:
         ws = self.worksheets[sheet]
         headers = SCHEMAS[sheet]
-        records = ws.get_all_records(default_blank="")
+        records = retry_sheets_call(partial(ws.get_all_records, default_blank=""))
         row_index = next((i + 2 for i, row in enumerate(records) if str(row.get(key, "")) == str(value)), None)
         values = [json_cell(record.get(header, "")) for header in headers]
         if row_index is None:
-            ws.append_row(values, value_input_option="RAW")
+            retry_sheets_call(partial(ws.append_row, values, value_input_option="RAW"))
         else:
-            ws.update(values=[values], range_name=f"A{row_index}")
+            retry_sheets_call(partial(ws.update, values=[values], range_name=f"A{row_index}"))
 
     def _delete_by_key(self, sheet: str, key: str, value: str) -> None:
         ws = self.worksheets[sheet]
-        records = ws.get_all_records(default_blank="")
+        records = retry_sheets_call(partial(ws.get_all_records, default_blank=""))
         for index in range(len(records), 0, -1):
             if str(records[index - 1].get(key, "")) == str(value):
-                ws.delete_rows(index + 1)
+                retry_sheets_call(partial(ws.delete_rows, index + 1))
 
     def purge_session_transcript(self, session_id: str) -> None:
         sid = str(session_id or "")

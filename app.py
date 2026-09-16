@@ -34,6 +34,7 @@ from src.data_store import (
     choose_store_backend,
     load_sheets_credentials,
     parse_json_cell,
+    public_store_error_message,
     require_sheets_enabled,
 )
 from src.browser_keys import render_saved_api_keys
@@ -165,17 +166,25 @@ def get_store():
                         store = build_sheets_store(spreadsheet_id, CONFIG.timezone, STORE_SCHEMA_VERSION)
                 except Exception as exc:
                     if require_sheets_enabled(SECRETS):
-                        raise
-                    st.session_state.store_error = str(exc)
+                        raise RuntimeError(public_store_error_message(exc)) from exc
+                    st.session_state.store_error = public_store_error_message(exc)
                     backend = "sqlite"
                     store = None
             if backend == "sheets" and store is not None:
-                store.ensure_schema()
-                store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
-                st.session_state.store_mode = "sheets"
-                st.session_state.store_error = ""
-                st.session_state.data_store = store
-                return store
+                try:
+                    store.ensure_schema()
+                    store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
+                except Exception as exc:
+                    if require_sheets_enabled(SECRETS):
+                        raise RuntimeError(public_store_error_message(exc)) from exc
+                    st.session_state.store_error = public_store_error_message(exc)
+                    backend = "sqlite"
+                    store = None
+                else:
+                    st.session_state.store_mode = "sheets"
+                    st.session_state.store_error = ""
+                    st.session_state.data_store = store
+                    return store
 
     app = SECRETS.get("app", {}) if isinstance(SECRETS.get("app"), dict) else {}
     sqlite_path = str(app.get("sqlite_path", "data/app.sqlite")).strip() or "data/app.sqlite"
@@ -192,7 +201,13 @@ def get_store():
     return store
 
 
-STORE = get_store()
+STORE = None
+try:
+    STORE = get_store()
+except Exception as exc:
+    st.error(public_store_error_message(exc))
+    st.info("這不是帳號或密碼錯誤；是 App 讀取登入／研究資料表失敗。請稍候約一分鐘後重新整理。")
+    st.stop()
 
 
 def _browser_sid() -> str:
