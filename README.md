@@ -13,7 +13,7 @@
 - 括弧非語言訊息，例如「（視線移開）」；原始文字完整保留。
 - 白名單 Email + OTP 登入；教師可在後台新增或停用帳號。
 - 學生自行輸入 Gemini API Key；Key 僅存於瀏覽器工作階段，不寫入 SQLite、逐字稿或研究資料。
-- SQLite 後台：whitelist、身分對照、Sessions、ChatLogs、AnonymousSessions、AnonymousChatLogs、Threads（含 counseling_plan／chat_analysis）、Assessments、SkillEvents、TeacherGrades、Settings、RiskEvents。
+- 後台資料：正式課務寫入 Google 試算表（Cloud reboot 不會消失）；本機未設試算表時用 SQLite。含 whitelist、身分對照、Sessions、ChatLogs、AnonymousSessions、AnonymousChatLogs、Threads（含 counseling_plan／chat_analysis）、Assessments、SkillEvents、TeacherGrades、Settings、RiskEvents。
 - 教師可依學校 Email 查看學生次數、時間、學派、逐字稿、AI 回饋及另存人工成績。
 - 學生可選擇下載當次 UTF-8 TXT 逐字稿。
 - 教師可匯出全部後台資料為多份 CSV 的 ZIP。
@@ -71,7 +71,7 @@ chmod +x scripts/start_local.sh
 ## 正式部署前必讀
 
 1. 複製 `.streamlit/secrets.toml.example` 為 `.streamlit/secrets.toml`，填入 SMTP、教師 Email、白名單與 `participant_salt`。登入名單之後也可在教師後台維護。
-2. 依 [部署操作手冊](docs/DEPLOYMENT_GUIDE.md) 上傳 GitHub 並設定 Streamlit Secrets（SQLite 路徑預設 `data/app.sqlite`）。
+2. 依 [部署操作手冊](docs/DEPLOYMENT_GUIDE.md) 上傳 GitHub，並在 Streamlit Secrets 設定試算表 ID 與服務帳戶（Cloud reboot 才不會清資料）。本機開發可用 `data/app.sqlite`。
 3. 依 [驗收清單](docs/ACCEPTANCE_CHECKLIST.md) 先用教師測試帳號跑完體驗、實作及續談。
 4. 正式研究前先確認研究倫理、知情同意、資料保存期限、教師評分用途與學生退出機制。
 

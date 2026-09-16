@@ -199,3 +199,37 @@ def test_memory_store_preserves_identity_thread_and_raw_turn():
         "mode": "practice", "status": "active", "updated_at": store.now(),
     })
     assert store.list_threads(participant_id)[0]["conversation_thread_id"] == "T1"
+
+
+def test_google_sheets_store_includes_login_session_mixin():
+    from src.data_store import GoogleSheetsStore, LoginSessionMixin
+
+    assert issubclass(GoogleSheetsStore, LoginSessionMixin)
+    assert hasattr(GoogleSheetsStore, "create_login_session")
+    assert hasattr(GoogleSheetsStore, "touch_login_session")
+    assert hasattr(GoogleSheetsStore, "list_online_users")
+
+
+def test_choose_store_backend_uses_sheets_when_secrets_present():
+    from src.data_store import choose_store_backend, require_sheets_enabled, sheets_secrets_present
+
+    empty = {}
+    assert choose_store_backend(empty) == "sqlite"
+    assert not sheets_secrets_present(empty)
+    assert not require_sheets_enabled(empty)
+
+    configured = {
+        "SPREADSHEET_ID": "sheet-id-demo",
+        "GOOGLE_SERVICE_ACCOUNT_JSON": {
+            "client_email": "bot@example.iam.gserviceaccount.com",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "private_key": "not-used-in-this-test",
+        },
+    }
+    assert sheets_secrets_present(configured)
+    assert choose_store_backend(configured) == "sheets"
+
+    required_only = {"REQUIRE_SHEETS": "true"}
+    assert require_sheets_enabled(required_only)
+    assert choose_store_backend(required_only) == "sheets"
+    assert not sheets_secrets_present(required_only)

@@ -27,7 +27,15 @@ from src.auth import (
     verify_password,
 )
 from src.config import AppConfig, DEFAULT_SETTINGS, as_bool
-from src.data_store import SCHEMAS, SqliteStore, parse_json_cell
+from src.data_store import (
+    SCHEMAS,
+    GoogleSheetsStore,
+    SqliteStore,
+    choose_store_backend,
+    load_sheets_credentials,
+    parse_json_cell,
+    require_sheets_enabled,
+)
 from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
 from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply, generate_thought_coach_reply
@@ -117,22 +125,66 @@ initialize_state()
 
 
 STORE_SCHEMA_VERSION = "anonymous-tables-1"
+ONLINE_TOUCH_INTERVAL_SECONDS = 60
 
 
 @st.cache_resource(show_spinner=False)
-def build_shared_store(sqlite_path: str, timezone: str, schema_version: str):
+def build_sqlite_store(sqlite_path: str, timezone: str, schema_version: str):
     return SqliteStore(sqlite_path, timezone)
 
 
+@st.cache_resource(show_spinner=False)
+def build_sheets_store(spreadsheet_id: str, timezone: str, schema_version: str):
+    return GoogleSheetsStore.from_secrets(SECRETS, timezone)
+
+
 def get_store():
+    backend = choose_store_backend(SECRETS)
+    store = st.session_state.get("data_store")
+    if backend == "sheets":
+        try:
+            spreadsheet_id, _ = load_sheets_credentials(SECRETS)
+        except Exception as exc:
+            if require_sheets_enabled(SECRETS):
+                raise RuntimeError(
+                    "REQUIRE_SHEETS 已開啟，但尚未設定可用的試算表 Secrets。"
+                ) from exc
+            backend = "sqlite"
+        else:
+            needs_new = (
+                store is None
+                or not isinstance(store, GoogleSheetsStore)
+                or not hasattr(store, "save_anonymous_transcript")
+                or not hasattr(store, "create_login_session")
+            )
+            if needs_new:
+                try:
+                    store = build_sheets_store(spreadsheet_id, CONFIG.timezone, STORE_SCHEMA_VERSION)
+                    if not hasattr(store, "save_anonymous_transcript") or not hasattr(store, "create_login_session"):
+                        build_sheets_store.clear()
+                        store = build_sheets_store(spreadsheet_id, CONFIG.timezone, STORE_SCHEMA_VERSION)
+                except Exception as exc:
+                    if require_sheets_enabled(SECRETS):
+                        raise
+                    st.session_state.store_error = str(exc)
+                    backend = "sqlite"
+                    store = None
+            if backend == "sheets" and store is not None:
+                store.ensure_schema()
+                store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
+                st.session_state.store_mode = "sheets"
+                st.session_state.store_error = ""
+                st.session_state.data_store = store
+                return store
+
     app = SECRETS.get("app", {}) if isinstance(SECRETS.get("app"), dict) else {}
     sqlite_path = str(app.get("sqlite_path", "data/app.sqlite")).strip() or "data/app.sqlite"
     store = st.session_state.get("data_store")
-    if store is None or not hasattr(store, "save_anonymous_transcript"):
-        store = build_shared_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
+    if store is None or not isinstance(store, SqliteStore) or not hasattr(store, "save_anonymous_transcript"):
+        store = build_sqlite_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
         if not hasattr(store, "save_anonymous_transcript"):
-            build_shared_store.clear()
-            store = build_shared_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
+            build_sqlite_store.clear()
+            store = build_sqlite_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
     store.ensure_schema()
     store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
     st.session_state.store_mode = "sqlite"
@@ -273,7 +325,11 @@ def show_online_people() -> None:
     if st.session_state.get("authenticated"):
         token = _browser_sid()
         if token:
-            STORE.touch_login_session(hash_browser_session_token(token))
+            now = time.time()
+            last = float(st.session_state.get("_online_touch_at") or 0)
+            if now - last >= ONLINE_TOUCH_INTERVAL_SECONDS:
+                STORE.touch_login_session(hash_browser_session_token(token))
+                st.session_state._online_touch_at = now
     try:
         people = STORE.list_online_users()
     except Exception:

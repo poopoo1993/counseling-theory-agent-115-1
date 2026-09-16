@@ -1,6 +1,6 @@
 # Google Sheets 後台設定
 
-本系統以一份 Google 試算表保存教學與研究資料。程式第一次連線時會自動建立各工作表，因此你只需要先建立空白試算表、服務帳戶及金鑰，並完成分享權限。
+本系統以一份 Google 試算表保存教學與研究資料。Streamlit Community Cloud 的本機 SQLite 會在 Reboot／Redeploy 時被清掉；試算表在 Google 雲端，不會跟著容器消失。程式第一次連線時會自動建立各工作表，因此你只需要先建立空白試算表、服務帳戶及金鑰，並完成分享權限。
 
 ## 一 建立空白試算表
 
@@ -57,7 +57,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = '''
 '''
 ```
 
-三個設定必須放在任何 `[app]`、`[email]` 等 section 之前。JSON 內容不可保留範例文字，也不可提交至 GitHub。
+三個設定必須放在任何 `[app]`、`[email]` 等 section 之前。JSON 內容不可保留範例文字，也不可提交至 GitHub。正式課務請設 `REQUIRE_SHEETS = true`：連線失敗會顯示錯誤，不會改回會被 Cloud reboot 清掉的本機 SQLite。
 
 ## 五 權限與研究資料建議
 

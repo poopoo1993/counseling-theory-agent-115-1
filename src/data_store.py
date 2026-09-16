@@ -1,6 +1,6 @@
 """Persistent research/login store. Production uses SQLite; Sheets code remains unused.
 
-API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。若願意但勾選匿名，晤談過程另存 AnonymousSessions／AnonymousChatLogs，不含帳號或 thread 關聯。
+API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。若願意但勾選匿名，晤談過程另存 AnonymousSessions／AnonymousChatLogs，不含帳號或 thread 關聯。正式課務以 Google 試算表持久化（Cloud reboot 不會清掉）；本機未設定試算表時才用 SQLite。
 """
 
 from __future__ import annotations
@@ -73,6 +73,59 @@ SCHEMAS: dict[str, list[str]] = {
         "last_seen_at",
     ],
 }
+
+
+def require_sheets_enabled(secrets: Mapping[str, Any]) -> bool:
+    return str(secrets.get("REQUIRE_SHEETS", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_sheets_credentials(secrets: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    spreadsheet_id = str(secrets.get("SPREADSHEET_ID", "")).strip()
+    service_json = secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    service_account: Mapping[str, Any] | dict[str, Any] = {}
+    if service_json:
+        if isinstance(service_json, Mapping):
+            service_account = dict(service_json)
+        else:
+            parsed = json.loads(str(service_json))
+            if not isinstance(parsed, dict):
+                raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是 JSON 物件。")
+            service_account = parsed
+
+    block = secrets.get("google_sheets", {})
+    if not isinstance(block, Mapping):
+        block = {}
+    if not spreadsheet_id:
+        spreadsheet_id = str(block.get("spreadsheet_id", "")).strip()
+    if not service_account:
+        nested_service = block.get("service_account", {})
+        if isinstance(nested_service, Mapping):
+            service_account = nested_service
+
+    if not service_account:
+        legacy_service = secrets.get("gcp_service_account", {})
+        if isinstance(legacy_service, Mapping):
+            service_account = legacy_service
+    if not spreadsheet_id or not service_account:
+        raise RuntimeError(
+            "尚未設定 SPREADSHEET_ID／GOOGLE_SERVICE_ACCOUNT_JSON，"
+            "或 google_sheets／gcp_service_account 相容欄位。"
+        )
+    return spreadsheet_id, dict(service_account)
+
+
+def sheets_secrets_present(secrets: Mapping[str, Any]) -> bool:
+    try:
+        spreadsheet_id, service_account = load_sheets_credentials(secrets)
+    except (RuntimeError, ValueError, json.JSONDecodeError, TypeError):
+        return False
+    return bool(spreadsheet_id and service_account)
+
+
+def choose_store_backend(secrets: Mapping[str, Any]) -> str:
+    if require_sheets_enabled(secrets) or sheets_secrets_present(secrets):
+        return "sheets"
+    return "sqlite"
 
 
 class ServiceAccountFieldsMissingError(ValueError):
@@ -333,7 +386,7 @@ def validate_private_key_structure(pem: str) -> None:
         raise PrivateKeyIncompleteError
 
 
-class GoogleSheetsStore(WhitelistMixin):
+class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
     def __init__(self, spreadsheet_id: str, service_account: Mapping[str, Any], timezone: str):
         import gspread
 
@@ -355,44 +408,7 @@ class GoogleSheetsStore(WhitelistMixin):
 
     @classmethod
     def from_secrets(cls, secrets: Mapping[str, Any], timezone: str) -> "GoogleSheetsStore":
-        # Preferred compatibility path: same syntax as the existing group /
-        # helping-skills Agents.
-        spreadsheet_id = str(secrets.get("SPREADSHEET_ID", "")).strip()
-        service_json = secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-        service_account: Mapping[str, Any] | dict[str, Any] = {}
-        if service_json:
-            if isinstance(service_json, Mapping):
-                service_account = dict(service_json)
-            else:
-                try:
-                    parsed = json.loads(str(service_json))
-                except json.JSONDecodeError:
-                    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是完整 JSON。") from None
-                if not isinstance(parsed, dict):
-                    raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON 必須是 JSON 物件。")
-                service_account = parsed
-
-        # Current nested syntax remains supported for existing deployments.
-        block = secrets.get("google_sheets", {})
-        if not isinstance(block, Mapping):
-            block = {}
-        if not spreadsheet_id:
-            spreadsheet_id = str(block.get("spreadsheet_id", "")).strip()
-        if not service_account:
-            nested_service = block.get("service_account", {})
-            if isinstance(nested_service, Mapping):
-                service_account = nested_service
-
-        # Older deployments used a top-level [gcp_service_account] section.
-        if not service_account:
-            legacy_service = secrets.get("gcp_service_account", {})
-            if isinstance(legacy_service, Mapping):
-                service_account = legacy_service
-        if not spreadsheet_id or not service_account:
-            raise RuntimeError(
-                "尚未設定 SPREADSHEET_ID／GOOGLE_SERVICE_ACCOUNT_JSON，"
-                "或 google_sheets／gcp_service_account 相容欄位。"
-            )
+        spreadsheet_id, service_account = load_sheets_credentials(secrets)
         return cls(spreadsheet_id, service_account, timezone)
 
     def now(self) -> str:
@@ -403,7 +419,7 @@ class GoogleSheetsStore(WhitelistMixin):
         for name, headers in SCHEMAS.items():
             ws = existing.get(name)
             if ws is None:
-                ws = self.book.add_worksheet(title=name, rows=1000, cols=max(20, len(headers) + 2))
+                ws = self.book.add_worksheet(title=name, rows=5000, cols=max(20, len(headers) + 2))
                 ws.append_row(headers, value_input_option="RAW")
                 ws.freeze(rows=1)
             else:

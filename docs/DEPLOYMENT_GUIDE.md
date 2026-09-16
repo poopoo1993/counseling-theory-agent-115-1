@@ -100,8 +100,9 @@ app_password = "Gmail應用程式密碼"
 - TeacherGrades
 - Settings
 - RiskEvents
+- AuthSessions
 
-若畫面顯示「本機暫存模式」，代表 Google Sheets 連線失敗。最常見原因是：
+若畫面顯示「本機暫存模式」或 `store_mode` 為 sqlite，代表沒有連上 Google Sheets，資料會在 Cloud Reboot 時消失。最常見原因是：
 
 1. spreadsheet_id 貼錯。
 2. 服務帳戶 private_key 換行格式破損。

@@ -138,12 +138,12 @@ Retry 3 times on 429/quota/timeout/503/UNAVAILABLE **on the same model**. Do not
 ## Auth and config
 
 - Login: enabled SQLite `whitelist` row. First visit: OTP, then set password. Later: email + password. OTP remains for first login / reset path.
-- After password or OTP+password-setup, set URL `sid` (random token); SQLite stores only `sha256(sid)` in `AuthSessions` for ~12h so refresh stays logged in.
+- After password or OTP+password-setup, set URL `sid` (random token); store only `sha256(sid)` in `AuthSessions` for ~12h so refresh stays logged in.
 - Seed: `[auth].login_allowlist` + `[auth].teacher_emails` (legacy `[app].teacher_test_emails`).
 - OTP: 6 digits, hashed `salt:sha256` in session state, default TTL 600s, resend cooldown 60s.
 - `local_demo_mode`: show OTP on screen.
 - `participant_salt` under `[auth]` or `[app]`.
-- SQLite path: `[app].sqlite_path` default `data/app.sqlite`.
+- Production: Google Sheets when `SPREADSHEET_ID` + service account are set; `REQUIRE_SHEETS=true` forbids SQLite fallback. Local demo: `[app].sqlite_path` default `data/app.sqlite` (wiped on Streamlit Cloud reboot).
 - Student Gemini API Key stays in Streamlit memory only. Refresh does not restore the key.
 
 ## Safety
