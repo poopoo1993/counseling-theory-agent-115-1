@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 0; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <script>
+      function post(type, extra) {
+        window.parent.postMessage(Object.assign({
+          isStreamlitMessage: true,
+          type: type
+        }, extra || {}), "*");
+      }
+
+      function setValue(value) {
+        post("streamlit:setComponentValue", { value: value });
+      }
+
+      function setHeight(height) {
+        post("streamlit:setFrameHeight", { height: height });
+      }
+
+      function usesThinking(model) {
+        var name = String(model || "").toLowerCase();
+        return (
+          name.indexOf("gemini-3") === 0 ||
+          name === "gemini-flash-latest" ||
+          name === "gemini-pro-latest" ||
+          name === "gemini-flash-lite-latest"
+        );
+      }
+
+      function thinkingConfig(model, level) {
+        if (!usesThinking(model)) return null;
+        if (String(level || "low").toLowerCase() === "low") {
+          return { thinkingBudget: 0 };
+        }
+        return { thinkingBudget: 1024 };
+      }
+
+      function extractText(payload) {
+        var candidate = ((payload || {}).candidates || [])[0] || {};
+        var parts = ((candidate.content || {}).parts) || [];
+        var text = "";
+        for (var i = 0; i < parts.length; i++) {
+          text += parts[i].text || "";
+        }
+        return String(text || "").trim();
+      }
+
+      function isRetryable(status, body) {
+        var text = String(body || "").toLowerCase();
+        return (
+          status === 429 || status === 500 || status === 502 || status === 503 || status === 504 ||
+          text.indexOf("resource_exhausted") >= 0 ||
+          text.indexOf("unavailable") >= 0 ||
+          text.indexOf("high demand") >= 0 ||
+          text.indexOf("overloaded") >= 0 ||
+          text.indexOf("quota") >= 0 ||
+          text.indexOf("timeout") >= 0
+        );
+      }
+
+      function shouldSwitchModel(status, body) {
+        var text = String(body || "").toLowerCase();
+        return (
+          status === 404 ||
+          text.indexOf("not found") >= 0 ||
+          text.indexOf("not_found") >= 0 ||
+          text.indexOf("no longer available") >= 0 ||
+          text.indexOf("not supported") >= 0
+        );
+      }
+
+      function backoff(attempt) {
+        return 800 * Math.pow(2, attempt);
+      }
+
+      function generateOnce(model, args) {
+        var url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+          encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(args.api_key);
+        var generationConfig = {
+          temperature: Number(args.temperature),
+          maxOutputTokens: Number(args.max_output_tokens),
+          responseMimeType: args.response_json ? "application/json" : "text/plain"
+        };
+        var thinking = thinkingConfig(model, args.thinking_level);
+        if (thinking) generationConfig.thinkingConfig = thinking;
+        var body = {
+          contents: [{ role: "user", parts: [{ text: String(args.prompt || "") }] }],
+          generationConfig: generationConfig
+        };
+        if (args.system_instruction) {
+          body.systemInstruction = { parts: [{ text: String(args.system_instruction) }] };
+        }
+        var started = Date.now();
+        return fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }).then(function (response) {
+          return response.text().then(function (raw) {
+            var payload = {};
+            try { payload = raw ? JSON.parse(raw) : {}; } catch (error) { payload = { error: { message: raw } }; }
+            return { status: response.status, payload: payload, latency: Date.now() - started, raw: raw };
+          });
+        });
+      }
+
+      function run(args) {
+        var models = (args.models && args.models.length) ? args.models : [];
+        var attempts = Math.max(1, Number(args.attempts) || 3);
+        var lastError = "Gemini 呼叫失敗。";
+        var chain = Promise.resolve();
+        var resultValue = null;
+
+        function tryModel(modelIndex) {
+          if (resultValue || modelIndex >= models.length) return Promise.resolve();
+          var model = models[modelIndex];
+          var tries = modelIndex === 0 ? attempts : Math.min(2, attempts);
+
+          function tryAttempt(attempt) {
+            if (resultValue) return Promise.resolve();
+            return generateOnce(model, args).then(function (result) {
+              if (result.status >= 200 && result.status < 300) {
+                var text = extractText(result.payload);
+                if (!text) {
+                  lastError = "空白內容";
+                  if (attempt < tries - 1) {
+                    return new Promise(function (resolve) { setTimeout(resolve, backoff(attempt)); })
+                      .then(function () { return tryAttempt(attempt + 1); });
+                  }
+                  return tryModel(modelIndex + 1);
+                }
+                resultValue = {
+                  request_id: args.request_id,
+                  text: text,
+                  model: model,
+                  latency_ms: result.latency,
+                  error: ""
+                };
+                return;
+              }
+              var errText = result.raw || JSON.stringify(result.payload);
+              lastError = errText;
+              if (isRetryable(result.status, errText) && attempt < tries - 1) {
+                return new Promise(function (resolve) { setTimeout(resolve, backoff(attempt)); })
+                  .then(function () { return tryAttempt(attempt + 1); });
+              }
+              if (shouldSwitchModel(result.status, errText)) {
+                return tryModel(modelIndex + 1);
+              }
+              resultValue = {
+                request_id: args.request_id,
+                text: "",
+                model: model,
+                latency_ms: result.latency,
+                error: errText
+              };
+            }).catch(function (error) {
+              lastError = String((error && error.message) || error);
+              if (isRetryable(0, lastError) && attempt < tries - 1) {
+                return new Promise(function (resolve) { setTimeout(resolve, backoff(attempt)); })
+                  .then(function () { return tryAttempt(attempt + 1); });
+              }
+              return tryModel(modelIndex + 1);
+            });
+          }
+
+          return tryAttempt(0);
+        }
+
+        chain = tryModel(0);
+        return chain.then(function () {
+          return resultValue || {
+            request_id: args.request_id,
+            text: "",
+            model: "",
+            latency_ms: 0,
+            error: lastError
+          };
+        });
+      }
+
+      var lastRequestId = "";
+      var inFlight = false;
+
+      window.addEventListener("message", function (event) {
+        if (!event.data || event.data.type !== "streamlit:render") return;
+        var args = event.data.args || {};
+        var job = args.job || {};
+        setHeight(1);
+        if (!job.request_id || !job.api_key) return;
+        if (job.request_id === lastRequestId) return;
+        if (inFlight) return;
+        lastRequestId = job.request_id;
+        inFlight = true;
+        run(job).then(function (value) {
+          inFlight = false;
+          setValue(value);
+          setHeight(1);
+        });
+      });
+
+      post("streamlit:componentReady", { apiVersion: 1 });
+      setHeight(1);
+    </script>
+  </body>
+</html>

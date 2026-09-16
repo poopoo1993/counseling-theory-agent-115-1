@@ -39,6 +39,7 @@ from src.data_store import (
 )
 from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
+from src.gemini_router import GeminiRouterPending
 from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply, generate_thought_coach_reply
 from src.prompts import (
     build_experience_analysis_prompt,
@@ -320,6 +321,12 @@ def persist_thread_state(status: str = "in_progress", *, include_turns: bool = T
 
 
 def logout() -> None:
+    flusher = getattr(STORE, "flush", None)
+    if callable(flusher):
+        try:
+            flusher()
+        except Exception:
+            pass
     token = _browser_sid()
     if token:
         STORE.delete_login_session(hash_browser_session_token(token))
@@ -539,23 +546,34 @@ def api_key_gate() -> GeminiService | None:
         if st.session_state.pop("auto_test_api_key", False) and str(key or "").strip():
             tested = True
         if tested:
+            st.session_state.pending_validate_key = str(key or "").strip()
+            if not st.session_state.get("validate_call_id"):
+                st.session_state.validate_call_id = f"validate-{uuid.uuid4().hex[:8]}"
+        pending_key = str(st.session_state.get("pending_validate_key") or "").strip()
+        if pending_key:
             try:
-                with st.spinner("正在測試連線…"):
-                    service = GeminiService(
-                        key,
-                        CONFIG.model_name,
-                        fallback_models=CONFIG.fallback_models,
-                    )
-                    service.validate_key()
-                st.session_state.api_key = str(key or "").strip()
+                service = GeminiService(
+                    pending_key,
+                    CONFIG.model_name,
+                    fallback_models=CONFIG.fallback_models,
+                    use_browser_router=True,
+                )
+                service.validate_key(call_id=str(st.session_state.get("validate_call_id") or "validate"))
+                st.session_state.api_key = pending_key
                 st.session_state.api_validated = True
                 st.session_state.active_model_name = service.model_name
-                st.session_state._pending_save_api_key = st.session_state.api_key
-                render_saved_api_keys(save_key=st.session_state.api_key)
+                st.session_state._pending_save_api_key = pending_key
+                st.session_state.pending_validate_key = ""
+                st.session_state.validate_call_id = ""
+                render_saved_api_keys(save_key=pending_key)
                 st.success("API Key 已驗證，可以開始練習。")
                 st.rerun()
+            except GeminiRouterPending:
+                st.caption("正在由這個瀏覽器測試 Gemini 連線…")
             except Exception as exc:
                 st.session_state.api_validated = False
+                st.session_state.pending_validate_key = ""
+                st.session_state.validate_call_id = ""
                 st.error(str(exc))
         result = render_saved_api_keys()
         if result and result.get("ts") != st.session_state.get("_api_key_event_ts"):
@@ -576,7 +594,17 @@ def gemini() -> GeminiService:
         str(st.session_state.get("active_model_name") or CONFIG.model_name),
         fallback_models=CONFIG.fallback_models,
         on_model_used=_remember_model,
+        use_browser_router=True,
     )
+
+
+def _session_in_progress() -> bool:
+    session = st.session_state.get("active_session") or {}
+    return bool(session) and str(session.get("completion_status") or "") == "in_progress"
+
+
+def _has_ai_turn() -> bool:
+    return any(str(turn.get("speaker_role") or "").startswith("ai_") for turn in (st.session_state.get("turns") or []))
 
 
 def store_turn(turn: dict[str, Any]) -> None:
@@ -612,6 +640,10 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
     show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
     # 新模擬開場沒有學生話語，不必先打分析引擎，避免一次連發三個 Gemini 請求。
     should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
+    session_id = str(session.get("session_id") or "")
+    turn_token = str(len(st.session_state.turns))
+    if is_opening and _has_ai_turn():
+        return
     if should_analyze:
         st.session_state.chat_analysis = analyze_chat(
             gemini(),
@@ -623,6 +655,7 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
             turns=turns,
             latest_student_message=latest_student_message,
             difficulty=str(session.get("difficulty", "")),
+            call_id=f"analyze-{session_id}-{turn_token}",
         )
         if show_turn_review and session["mode"] == "practice" and latest_student_message:
             student_index = next(
@@ -647,6 +680,7 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
         counseling_plan=st.session_state.counseling_plan,
         chat_analysis=st.session_state.chat_analysis,
         is_opening=is_opening,
+        call_id=f"chat-{session_id}-{turn_token}",
     )
     role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
     store_turn(new_turn(
@@ -665,6 +699,11 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
 def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
     validate_selected_techniques(school_id, selected_ids)
     service = gemini()
+    if _session_in_progress():
+        if st.session_state.get("pending_opening"):
+            generate_ai_turn(is_opening=True)
+            st.session_state.pending_opening = False
+        return
     if uses_planner_llm(mode, difficulty):
         plan = create_counseling_plan(
             service,
@@ -673,6 +712,7 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
             selected_ids=selected_ids,
             theme=theme,
             difficulty=difficulty,
+            call_id=f"plan-new-{st.session_state.participant_id}-{mode}-{school_id}-{theme}-{difficulty}",
         )
         case_data = case_data_from_plan(plan) if mode == "practice" else None
         case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
@@ -704,7 +744,9 @@ def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme:
     st.session_state.assessment = None
     STORE.start_session(session)
     persist_thread_state("in_progress")
+    st.session_state.pending_opening = True
     generate_ai_turn(is_opening=True)
+    st.session_state.pending_opening = False
 
 
 def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
@@ -714,6 +756,12 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     prior_difficulty = str(thread.get("difficulty") or "").strip()
     difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
     service = gemini()
+    thread_id = str(thread["conversation_thread_id"])
+    if _session_in_progress() and str((st.session_state.active_session or {}).get("conversation_thread_id")) == thread_id:
+        if st.session_state.get("pending_opening"):
+            generate_ai_turn(is_opening=True)
+            st.session_state.pending_opening = False
+        return
     session = new_session(
         participant_id=st.session_state.participant_id,
         mode=mode,
@@ -724,7 +772,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
         timezone=CONFIG.timezone,
         theme="續談上次議題",
         difficulty=difficulty,
-        thread_id=str(thread["conversation_thread_id"]),
+        thread_id=thread_id,
         case_id=str(thread.get("case_id", "student_topic")),
     )
     st.session_state.active_session = session
@@ -748,13 +796,16 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
             prior_snapshot=st.session_state.continuation_snapshot,
             prior_plan=st.session_state.counseling_plan,
             prior_analysis=st.session_state.chat_analysis,
+            call_id=f"plan-cont-{thread_id}",
         )
         session["model_name"] = service.model_name
         if mode == "practice":
             st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
     STORE.start_session(session)
     persist_thread_state("in_progress")
+    st.session_state.pending_opening = True
     generate_ai_turn(is_opening=True)
+    st.session_state.pending_opening = False
 
 
 def new_practice_panel(settings: dict[str, str]) -> None:
@@ -812,13 +863,14 @@ def new_practice_panel(settings: dict[str, str]) -> None:
         if len(selected) != 3:
             st.error("開始前必須選擇恰好三項技巧。")
             return
-        try:
-            spinner = "正在擬定學派計畫並建立開場…" if uses_planner_llm(mode, difficulty) else "正在開始示範晤談…"
-            with st.spinner(spinner):
-                start_new_session(mode, school_id, list(selected), PRACTICE_THEMES[theme_id], difficulty)
-            st.rerun()
-        except Exception as exc:
-            st.error(f"無法開始模擬：{exc}")
+        st.session_state.pending_start_new = {
+            "mode": mode,
+            "school_id": school_id,
+            "selected_ids": list(selected),
+            "theme": PRACTICE_THEMES[theme_id],
+            "difficulty": difficulty,
+        }
+        st.rerun()
     if not ready:
         st.caption("請先選滿三項技巧，再開始模擬。")
 
@@ -875,12 +927,11 @@ def continuation_panel() -> None:
         if len(selected) != 3:
             st.error("開始前必須選擇恰好三項技巧。")
             return
-        try:
-            with st.spinner("正在接續上次晤談關係…"):
-                start_continuation(thread, list(selected))
-            st.rerun()
-        except Exception as exc:
-            st.error(f"無法開始續談：{exc}")
+        st.session_state.pending_continuation = {
+            "thread": thread,
+            "selected_ids": list(selected),
+        }
+        st.rerun()
 
 
 def stop_simulation_for_risk(session: dict[str, Any], prompt: str) -> None:
@@ -921,40 +972,55 @@ def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> N
             label_visibility="collapsed",
         )
         submitted = st.form_submit_button("送出想法", use_container_width=True)
-    if not submitted:
-        return
-    text = str(thought or "").strip()
+    if submitted:
+        text = str(thought or "").strip()
+        if not text:
+            return
+        if detect_pii(text):
+            st.error("內容疑似包含 Email、電話或身分證格式。請刪除可識別資訊後再送出。")
+            return
+        if detect_immediate_risk(text):
+            stop_simulation_for_risk(session, text)
+            st.rerun()
+            return
+        st.session_state.pending_thought = text
+        if st.session_state.get("pending_thought_noted") != text:
+            notes.append({"role": "student", "content": text})
+            st.session_state.coach_thoughts = notes
+            st.session_state.pending_thought_noted = text
+    text = str(st.session_state.get("pending_thought") or "").strip()
     if not text:
         return
-    if detect_pii(text):
-        st.error("內容疑似包含 Email、電話或身分證格式。請刪除可識別資訊後再送出。")
-        return
-    if detect_immediate_risk(text):
-        stop_simulation_for_risk(session, text)
-        st.rerun()
-        return
-    notes.append({"role": "student", "content": text})
+    notes = list(st.session_state.get("coach_thoughts") or [])
     examples = analysis.get("example_replies")
     if not isinstance(examples, list):
         examples = []
     try:
-        with st.spinner("正在回應你的想法…"):
-            reply = generate_thought_coach_reply(
-                gemini(),
-                mode=session["mode"],
-                school_id=session["school_id"],
-                selected_ids=session["selected_techniques"],
-                turns=st.session_state.prior_turns_context + st.session_state.turns,
-                student_guide=str(analysis.get("student_guide", "")),
-                example_replies=[str(item) for item in examples],
-                prior_notes=notes,
-                latest_thought=text,
-            )
+        reply = generate_thought_coach_reply(
+            gemini(),
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            turns=st.session_state.prior_turns_context + st.session_state.turns,
+            student_guide=str(analysis.get("student_guide", "")),
+            example_replies=[str(item) for item in examples],
+            prior_notes=notes,
+            latest_thought=text,
+            call_id=f"thought-{session.get('session_id')}-{len(notes)}",
+        )
         notes.append({"role": "coach", "content": reply})
+        st.session_state.coach_thoughts = notes
+        st.session_state.pending_thought = ""
+        st.session_state.pending_thought_noted = ""
+        st.rerun()
+    except GeminiRouterPending:
+        raise
     except Exception as exc:
         notes.append({"role": "coach", "content": f"暫時無法回應這個想法：{exc}"})
-    st.session_state.coach_thoughts = notes
-    st.rerun()
+        st.session_state.coach_thoughts = notes
+        st.session_state.pending_thought = ""
+        st.session_state.pending_thought_noted = ""
+        st.rerun()
 
 
 def render_chat() -> None:
@@ -1044,28 +1110,38 @@ def render_chat() -> None:
     else:
         render_dialog()
         prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
-    if not prompt:
-        return
-    pii = detect_pii(prompt)
-    if pii:
-        st.error("內容疑似包含 Email、電話或身分證格式。請刪除可識別資訊後再送出。")
-        return
-    student_role = "student_counselor" if session["mode"] == "practice" else "student_client"
-    student_turn = new_turn(
-        session=session,
-        turn_index=len(st.session_state.turns) + 1,
-        speaker_role=student_role,
-        content=prompt,
-        timezone=CONFIG.timezone,
-    )
-    store_turn(student_turn)
-    if detect_immediate_risk(prompt):
-        stop_simulation_for_risk(session, prompt)
-        st.rerun()
+    if prompt:
+        pii = detect_pii(prompt)
+        if pii:
+            st.error("內容疑似包含 Email、電話或身分證格式。請刪除可識別資訊後再送出。")
+            return
+        if st.session_state.get("pending_student_stored") != prompt:
+            student_role = "student_counselor" if session["mode"] == "practice" else "student_client"
+            store_turn(new_turn(
+                session=session,
+                turn_index=len(st.session_state.turns) + 1,
+                speaker_role=student_role,
+                content=prompt,
+                timezone=CONFIG.timezone,
+            ))
+            st.session_state.pending_student_stored = prompt
+        if detect_immediate_risk(prompt):
+            stop_simulation_for_risk(session, prompt)
+            st.session_state.pending_ai_turn = None
+            st.session_state.pending_student_stored = None
+            st.rerun()
+            return
+        st.session_state.pending_ai_turn = prompt
+    pending = str(st.session_state.get("pending_ai_turn") or "")
+    if not pending:
         return
     try:
-        with st.spinner("正在分析對話並回應…"):
-            generate_ai_turn(is_opening=False, latest_student_message=prompt)
+        generate_ai_turn(is_opening=False, latest_student_message=pending)
+        st.session_state.pending_ai_turn = None
+        st.session_state.pending_student_stored = None
+        st.rerun()
+    except GeminiRouterPending:
+        raise
     except Exception as exc:
         store_turn(new_turn(
             session=session,
@@ -1075,7 +1151,9 @@ def render_chat() -> None:
             timezone=CONFIG.timezone,
             error_flag=str(exc)[:300],
         ))
-    st.rerun()
+        st.session_state.pending_ai_turn = None
+        st.session_state.pending_student_stored = None
+        st.rerun()
 
 
 def request_experience_research_consent() -> None:
@@ -1092,11 +1170,13 @@ def _open_experience_research_consent() -> None:
         if anonymous:
             st.caption("帳號只留完成紀錄；晤談過程另以不記名與時間保存。")
         if willing:
-            finalize_session(consent="anonymous" if anonymous else "yes")
+            st.session_state.pending_finalize = {
+                "consent": "anonymous" if anonymous else "yes",
+            }
             st.rerun()
     with drop_col:
         if st.button("不願意", use_container_width=True):
-            finalize_session(consent="no")
+            st.session_state.pending_finalize = {"consent": "no"}
             st.rerun()
 
 
@@ -1155,8 +1235,11 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
             temperature=0.1,
             max_output_tokens=3200,
             response_json=True,
+            call_id=f"eval-{session['session_id']}",
         )
         parsed = parse_json_response(raw)
+    except GeminiRouterPending:
+        raise
     except Exception as exc:
         parsed = {
             "total_score": None,
@@ -1166,7 +1249,7 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
             "limitations": str(exc),
         }
 
-    assessment_id = str(uuid.uuid4())
+    assessment_id = str(st.session_state.setdefault(f"_assessment_id_{session['session_id']}", str(uuid.uuid4())))
     record = {
         "assessment_id": assessment_id,
         "session_id": session["session_id"],
@@ -1186,7 +1269,9 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
         "parsed_json": parsed,
         "created_at": STORE.now(),
     }
-    STORE.save_assessment(record)
+    if st.session_state.get("_assessment_saved_for") != session["session_id"]:
+        STORE.save_assessment(record)
+        st.session_state._assessment_saved_for = session["session_id"]
     st.session_state.assessment = parsed
     st.session_state.raw_assessment = raw
 
@@ -1200,8 +1285,11 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
             temperature=0.1,
             max_output_tokens=1600,
             response_json=True,
+            call_id=f"snapshot-{session['session_id']}",
         )
         snapshot = parse_json_response(snapshot_raw)
+    except GeminiRouterPending:
+        raise
     except Exception:
         snapshot = {
             "continuation_role": session["continuation_role"],
@@ -1356,6 +1444,46 @@ def student_page() -> None:
         return
     if pending_save:
         render_saved_api_keys(save_key=pending_save, hide=True)
+    pending_start = st.session_state.get("pending_start_new")
+    if pending_start:
+        try:
+            start_new_session(**pending_start)
+            st.session_state.pending_start_new = None
+            st.rerun()
+        except GeminiRouterPending:
+            raise
+        except Exception as exc:
+            st.session_state.pending_start_new = None
+            st.error(f"無法開始模擬：{exc}")
+            return
+    pending_cont = st.session_state.get("pending_continuation")
+    if pending_cont:
+        try:
+            start_continuation(pending_cont["thread"], pending_cont["selected_ids"])
+            st.session_state.pending_continuation = None
+            st.rerun()
+        except GeminiRouterPending:
+            raise
+        except Exception as exc:
+            st.session_state.pending_continuation = None
+            st.error(f"無法開始續談：{exc}")
+            return
+    pending_final = st.session_state.get("pending_finalize")
+    if pending_final and st.session_state.get("active_session"):
+        try:
+            finalize_session(**pending_final)
+            st.session_state.pending_finalize = None
+            st.rerun()
+        except GeminiRouterPending:
+            raise
+        except Exception as exc:
+            st.session_state.pending_finalize = None
+            st.error(f"結束晤談時發生問題：{exc}")
+            return
+    in_chat = bool(
+        st.session_state.active_session
+        and st.session_state.active_session.get("completion_status") == "in_progress"
+    )
     if st.session_state.active_session:
         if in_chat:
             render_chat()
@@ -1370,6 +1498,9 @@ def student_page() -> None:
 
 
 def export_research_zip() -> bytes:
+    flusher = getattr(STORE, "flush", None)
+    if callable(flusher):
+        flusher()
     declined = {
         str(row.get("session_id"))
         for row in STORE.all_records("Sessions")
@@ -1633,14 +1764,17 @@ def teacher_dashboard() -> None:
                 st.error(f"資料匯出失敗：{exc}")
 
 
-restore_browser_session()
-if st.session_state.pending_password_email and not st.session_state.authenticated:
-    password_setup_page()
-elif not st.session_state.authenticated:
-    login_page()
-else:
-    sidebar()
-    if st.session_state.view == "teacher":
-        teacher_dashboard()
+try:
+    restore_browser_session()
+    if st.session_state.pending_password_email and not st.session_state.authenticated:
+        password_setup_page()
+    elif not st.session_state.authenticated:
+        login_page()
     else:
-        student_page()
+        sidebar()
+        if st.session_state.view == "teacher":
+            teacher_dashboard()
+        else:
+            student_page()
+except GeminiRouterPending:
+    st.caption("正在由這個瀏覽器呼叫 Gemini…")

@@ -109,7 +109,8 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   overflow: visible !important;
 }
 
-iframe[title$="ime_enter_guard"] {
+iframe[title$="ime_enter_guard"],
+iframe[title$="gemini_router"] {
   height: 0 !important;
   width: 0 !important;
   border: 0 !important;
@@ -118,7 +119,9 @@ iframe[title$="ime_enter_guard"] {
 }
 
 [data-testid="stElementContainer"]:has(iframe[title$="ime_enter_guard"]),
-[data-testid="element-container"]:has(iframe[title$="ime_enter_guard"]) {
+[data-testid="element-container"]:has(iframe[title$="ime_enter_guard"]),
+[data-testid="stElementContainer"]:has(iframe[title$="gemini_router"]),
+[data-testid="element-container"]:has(iframe[title$="gemini_router"]) {
   height: 0 !important;
   min-height: 0 !important;
   margin: 0 !important;

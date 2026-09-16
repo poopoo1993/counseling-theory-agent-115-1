@@ -5,11 +5,13 @@ API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；
 
 from __future__ import annotations
 
+import atexit
 import base64
 import binascii
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -160,6 +162,16 @@ SERVICE_ACCOUNT_USER_ERROR = (
     "Google 服務帳戶金鑰格式不正確，無法連線試算表。"
     "請檢查 Streamlit Secrets 的 GOOGLE_SERVICE_ACCOUNT_JSON。"
 )
+
+SHEETS_FLUSH_ROW_THRESHOLD = 80
+SHEETS_FLUSH_INTERVAL_SECONDS = 15.0
+IMMEDIATE_SHEETS = frozenset({
+    "whitelist",
+    "AuthSessions",
+    "IdentityMap",
+    "Settings",
+    "RiskEvents",
+})
 
 
 def is_transient_sheets_error(exc: BaseException) -> bool:
@@ -520,6 +532,7 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
         self.book = retry_sheets_call(lambda: client.open_by_key(spreadsheet_id))
         self.timezone = timezone
         self.worksheets: dict[str, Any] = {}
+        self._init_write_buffer()
         self.ensure_schema()
 
     @classmethod
@@ -586,28 +599,182 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
             result[name] = [str(cell) for cell in row]
         return result
 
-    def append(self, sheet: str, record: Mapping[str, Any]) -> None:
+    def _init_write_buffer(self) -> None:
+        if getattr(self, "_buffer_lock", None) is not None:
+            return
+        self._buffer_lock = threading.Lock()
+        self._pending_appends: dict[str, list[dict[str, Any]]] = {}
+        self._pending_upserts: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._buffer_since = time.monotonic()
+        self._flush_timer: threading.Timer | None = None
+        atexit.register(self._atexit_flush)
+
+    def _atexit_flush(self) -> None:
+        try:
+            self.flush()
+        except Exception:
+            pass
+
+    def _pending_count_locked(self) -> int:
+        return sum(len(rows) for rows in self._pending_appends.values()) + len(self._pending_upserts)
+
+    def _arm_flush_timer_locked(self) -> None:
+        if self._pending_count_locked() == 1:
+            self._buffer_since = time.monotonic()
+        if self._flush_timer is not None:
+            return
+        delay = float(SHEETS_FLUSH_INTERVAL_SECONDS)
+        if delay <= 0:
+            return
+        timer = threading.Timer(delay, self._atexit_flush)
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
+    def _cancel_flush_timer_locked(self) -> None:
+        timer = self._flush_timer
+        self._flush_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _maybe_flush_locked(self) -> None:
+        if self._pending_count_locked() <= 0:
+            return
+        due = (time.monotonic() - self._buffer_since) >= float(SHEETS_FLUSH_INTERVAL_SECONDS)
+        if self._pending_count_locked() >= int(SHEETS_FLUSH_ROW_THRESHOLD) or due:
+            self._flush_locked()
+
+    def flush(self) -> None:
+        self._init_write_buffer()
+        with self._buffer_lock:
+            self._flush_locked()
+
+    def _append_rows_now(self, sheet: str, records: Sequence[Mapping[str, Any]]) -> None:
+        if not records:
+            return
         headers = SCHEMAS[sheet]
-        values = [json_cell(record.get(key, "")) for key in headers]
-        retry_sheets_call(partial(
-            self.worksheets[sheet].append_row, values, value_input_option="RAW"
-        ))
+        rows = [[json_cell(record.get(header, "")) for header in headers] for record in records]
+        ws = self.worksheets[sheet]
+        append_rows = getattr(ws, "append_rows", None)
+        if callable(append_rows):
+            retry_sheets_call(partial(append_rows, rows, value_input_option="RAW"))
+            return
+        for row in rows:
+            retry_sheets_call(partial(ws.append_row, row, value_input_option="RAW"))
 
-    def all_records(self, sheet: str) -> list[dict[str, Any]]:
-        return retry_sheets_call(partial(
-            self.worksheets[sheet].get_all_records, default_blank=""
-        ))
+    def _append_now(self, sheet: str, record: Mapping[str, Any]) -> None:
+        self._append_rows_now(sheet, [record])
 
-    def _upsert_by_key(self, sheet: str, key: str, value: str, record: Mapping[str, Any]) -> None:
+    def _upsert_now(self, sheet: str, key: str, value: str, record: Mapping[str, Any]) -> None:
+        self._flush_upserts_now(sheet, [(key, value, dict(record))])
+
+    def _flush_upserts_now(self, sheet: str, items: Sequence[tuple[str, str, Mapping[str, Any]]]) -> None:
+        if not items:
+            return
         ws = self.worksheets[sheet]
         headers = SCHEMAS[sheet]
         records = retry_sheets_call(partial(ws.get_all_records, default_blank=""))
-        row_index = next((i + 2 for i, row in enumerate(records) if str(row.get(key, "")) == str(value)), None)
-        values = [json_cell(record.get(header, "")) for header in headers]
-        if row_index is None:
-            retry_sheets_call(partial(ws.append_row, values, value_input_option="RAW"))
-        else:
-            retry_sheets_call(partial(ws.update, values=[values], range_name=f"A{row_index}"))
+        updates: list[dict[str, Any]] = []
+        new_rows: list[Mapping[str, Any]] = []
+        for key, value, record in items:
+            values = [json_cell(record.get(header, "")) for header in headers]
+            row_index = next(
+                (i + 2 for i, row in enumerate(records) if str(row.get(key, "")) == str(value)),
+                None,
+            )
+            if row_index is None:
+                new_rows.append(record)
+                records.append({header: json_cell(record.get(header, "")) for header in headers})
+            else:
+                updates.append({"range": f"A{row_index}", "values": [values]})
+        if updates:
+            batch_update = getattr(ws, "batch_update", None)
+            if callable(batch_update):
+                retry_sheets_call(partial(batch_update, updates))
+            else:
+                for item in updates:
+                    retry_sheets_call(partial(
+                        ws.update, values=item["values"], range_name=item["range"]
+                    ))
+        self._append_rows_now(sheet, new_rows)
+
+    def _flush_locked(self) -> None:
+        appends = self._pending_appends
+        upserts = self._pending_upserts
+        self._pending_appends = {}
+        self._pending_upserts = {}
+        self._cancel_flush_timer_locked()
+        self._buffer_since = time.monotonic()
+        for sheet, records in appends.items():
+            self._append_rows_now(sheet, records)
+        by_sheet: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+        for (sheet, key, value), record in upserts.items():
+            by_sheet.setdefault(sheet, []).append((key, value, record))
+        for sheet, items in by_sheet.items():
+            self._flush_upserts_now(sheet, items)
+
+    def _drop_buffered_session(self, session_id: str) -> None:
+        sid = str(session_id or "")
+        if not sid:
+            return
+        self._init_write_buffer()
+        with self._buffer_lock:
+            for sheet in ("ChatLogs", "Assessments", "SkillEvents"):
+                rows = self._pending_appends.get(sheet) or []
+                self._pending_appends[sheet] = [
+                    row for row in rows if str(row.get("session_id", "")) != sid
+                ]
+                for item_key in [
+                    key for key, record in self._pending_upserts.items()
+                    if key[0] == sheet and str(record.get("session_id", "")) == sid
+                ]:
+                    self._pending_upserts.pop(item_key, None)
+
+    def append(self, sheet: str, record: Mapping[str, Any]) -> None:
+        payload = dict(record)
+        if sheet in IMMEDIATE_SHEETS:
+            self._append_now(sheet, payload)
+            return
+        self._init_write_buffer()
+        with self._buffer_lock:
+            self._pending_appends.setdefault(sheet, []).append(payload)
+            self._arm_flush_timer_locked()
+            self._maybe_flush_locked()
+
+    def all_records(self, sheet: str) -> list[dict[str, Any]]:
+        rows = retry_sheets_call(partial(
+            self.worksheets[sheet].get_all_records, default_blank=""
+        ))
+        merged = [dict(row) for row in rows]
+        lock = getattr(self, "_buffer_lock", None)
+        if lock is None:
+            return merged
+        with lock:
+            for record in self._pending_appends.get(sheet, []):
+                merged.append(dict(record))
+            for (pending_sheet, key, value), record in self._pending_upserts.items():
+                if pending_sheet != sheet:
+                    continue
+                index = next(
+                    (i for i, row in enumerate(merged) if str(row.get(key, "")) == str(value)),
+                    None,
+                )
+                if index is None:
+                    merged.append(dict(record))
+                else:
+                    merged[index] = dict(record)
+        return merged
+
+    def _upsert_by_key(self, sheet: str, key: str, value: str, record: Mapping[str, Any]) -> None:
+        payload = dict(record)
+        if sheet in IMMEDIATE_SHEETS:
+            self._upsert_now(sheet, key, str(value), payload)
+            return
+        self._init_write_buffer()
+        with self._buffer_lock:
+            self._pending_upserts[(sheet, str(key), str(value))] = payload
+            self._arm_flush_timer_locked()
+            self._maybe_flush_locked()
 
     def _delete_by_key(self, sheet: str, key: str, value: str) -> None:
         ws = self.worksheets[sheet]
@@ -616,10 +783,20 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
             if str(records[index - 1].get(key, "")) == str(value):
                 retry_sheets_call(partial(ws.delete_rows, index + 1))
 
+    def delete_login_session(self, token_hash: str) -> None:
+        self.flush()
+        LoginSessionMixin.delete_login_session(self, token_hash)
+
     def purge_session_transcript(self, session_id: str) -> None:
         sid = str(session_id or "")
         if not sid:
             return
+        dropper = getattr(self, "_drop_buffered_session", None)
+        if callable(dropper):
+            dropper(sid)
+        flusher = getattr(self, "flush", None)
+        if callable(flusher):
+            flusher()
         self._delete_by_key("ChatLogs", "session_id", sid)
         self._delete_by_key("Assessments", "session_id", sid)
         self._delete_by_key("SkillEvents", "session_id", sid)
@@ -653,6 +830,9 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
                 "latency_ms": turn.get("latency_ms", ""),
                 "error_flag": turn.get("error_flag", ""),
             })
+        flusher = getattr(self, "flush", None)
+        if callable(flusher):
+            flusher()
         return anon_id
 
     def anonymous_session_turns(self, anonymous_session_id: str) -> list[dict[str, Any]]:
@@ -689,6 +869,9 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
 
     def finish_session(self, session: Mapping[str, Any]) -> None:
         self._upsert_by_key("Sessions", "session_id", str(session["session_id"]), session)
+        flusher = getattr(self, "flush", None)
+        if callable(flusher):
+            flusher()
 
     def append_turn(self, turn: Mapping[str, Any]) -> None:
         self.append("ChatLogs", turn)
@@ -715,6 +898,9 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
                 "participant_id": record.get("participant_id", ""),
                 **event,
             })
+        flusher = getattr(self, "flush", None)
+        if callable(flusher):
+            flusher()
 
     def get_settings(self) -> dict[str, str]:
         return {str(r.get("key")): str(r.get("value")) for r in self.all_records("Settings")}

@@ -44,6 +44,7 @@ def test_ime_enter_guard_blocks_composition_enter() -> None:
     assert "justEnded" in html
     assert "st.chat_input" not in html
     assert 'iframe[title$="ime_enter_guard"]' in APP_CSS
+    assert 'iframe[title$="gemini_router"]' in APP_CSS
     assert callable(install_ime_enter_guard)
 
 

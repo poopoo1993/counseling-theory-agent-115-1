@@ -251,16 +251,29 @@ class _FakeWorksheet:
         self.rows = []
         self.row_values_calls = 0
         self.update_calls = 0
+        self.append_row_calls = 0
+        self.append_rows_calls = 0
+        self.batch_update_calls = 0
+        self.get_all_records_calls = 0
 
     def row_values(self, row):
         self.row_values_calls += 1
         return list(self.headers) if row == 1 else []
 
     def append_row(self, values, value_input_option="RAW"):
+        self.append_row_calls += 1
         if not self.headers:
             self.headers = [str(item) for item in values]
             return
         self.rows.append([str(item) for item in values])
+
+    def append_rows(self, values, value_input_option="RAW"):
+        self.append_rows_calls += 1
+        for row in values:
+            if not self.headers:
+                self.headers = [str(item) for item in row]
+                continue
+            self.rows.append([str(item) for item in row])
 
     def freeze(self, rows=None, cols=None):
         return None
@@ -270,7 +283,22 @@ class _FakeWorksheet:
         if values:
             self.headers = [str(item) for item in values[0]]
 
+    def batch_update(self, data, value_input_option="RAW"):
+        self.batch_update_calls += 1
+        for item in data:
+            range_name = str(item.get("range") or "")
+            values = item.get("values") or []
+            if not range_name.startswith("A") or not values:
+                continue
+            try:
+                row_index = int(range_name[1:]) - 2
+            except ValueError:
+                continue
+            if 0 <= row_index < len(self.rows):
+                self.rows[row_index] = [str(cell) for cell in values[0]]
+
     def get_all_records(self, default_blank=""):
+        self.get_all_records_calls += 1
         records = []
         for row in self.rows:
             item = {}
@@ -320,7 +348,10 @@ def _fake_sheets_store(headers_ok: bool = True):
     store.book = book
     store.timezone = "Asia/Taipei"
     store.worksheets = {}
+    store._init_write_buffer()
     store.ensure_schema()
+    with store._buffer_lock:
+        store._cancel_flush_timer_locked()
     return store, book
 
 
@@ -393,3 +424,104 @@ def test_seed_whitelist_does_not_rewrite_existing_teacher():
     assert calls["n"] == 0
     assert store.is_whitelisted("student@hcu.edu.tw")
     assert store.get_whitelist_role("teacher@hcu.edu.tw") == "teacher"
+
+
+def test_sheets_buffer_holds_below_threshold_then_flush_batches(monkeypatch):
+    monkeypatch.setattr("src.data_store.SHEETS_FLUSH_INTERVAL_SECONDS", 3600)
+    store, _ = _fake_sheets_store()
+    chat = store.worksheets["ChatLogs"]
+    before_rows = chat.append_rows_calls
+    before_row = chat.append_row_calls
+    for index in range(79):
+        store.append_turn({"session_id": "S1", "turn_index": index, "content_raw": f"t{index}"})
+    assert chat.append_rows_calls == before_rows
+    assert chat.append_row_calls == before_row
+    assert len(store.session_turns("S1")) == 79
+    store.flush()
+    assert chat.append_rows_calls == before_rows + 1
+    assert len(store.session_turns("S1")) == 79
+
+
+def test_sheets_buffer_flushes_once_at_row_threshold(monkeypatch):
+    monkeypatch.setattr("src.data_store.SHEETS_FLUSH_INTERVAL_SECONDS", 3600)
+    store, _ = _fake_sheets_store()
+    chat = store.worksheets["ChatLogs"]
+    before_rows = chat.append_rows_calls
+    for index in range(80):
+        store.append_turn({"session_id": "S1", "turn_index": index, "content_raw": f"t{index}"})
+    assert chat.append_rows_calls == before_rows + 1
+    assert len(store.session_turns("S1")) == 80
+
+
+def test_sheets_buffer_coalesces_thread_upserts(monkeypatch):
+    monkeypatch.setattr("src.data_store.SHEETS_FLUSH_INTERVAL_SECONDS", 3600)
+    store, _ = _fake_sheets_store()
+    threads = store.worksheets["Threads"]
+    store.save_thread({
+        "conversation_thread_id": "T1",
+        "participant_id": "P1",
+        "status": "active",
+        "updated_at": "1",
+        "latest_snapshot": "first",
+    })
+    store.save_thread({
+        "conversation_thread_id": "T1",
+        "participant_id": "P1",
+        "status": "active",
+        "updated_at": "2",
+        "latest_snapshot": "second",
+    })
+    assert threads.append_rows_calls == 0
+    assert threads.batch_update_calls == 0
+    store.flush()
+    assert threads.append_rows_calls == 1
+    assert threads.batch_update_calls == 0
+    assert threads.get_all_records()[-1]["latest_snapshot"] == "second"
+    store.save_thread({
+        "conversation_thread_id": "T1",
+        "participant_id": "P1",
+        "status": "active",
+        "updated_at": "3",
+        "latest_snapshot": "third",
+    })
+    store.flush()
+    assert threads.batch_update_calls == 1
+    assert threads.get_all_records()[-1]["latest_snapshot"] == "third"
+
+
+def test_immediate_sheets_write_without_buffer(monkeypatch):
+    monkeypatch.setattr("src.data_store.SHEETS_FLUSH_INTERVAL_SECONDS", 3600)
+    store, _ = _fake_sheets_store()
+    risk = store.worksheets["RiskEvents"]
+    auth = store.worksheets["AuthSessions"]
+    before_risk = risk.append_rows_calls
+    before_auth = auth.append_rows_calls
+    store.append("RiskEvents", {"risk_event_id": "r1", "event_type": "keyword"})
+    store.append("AuthSessions", {
+        "token_hash": "abc",
+        "email": "student@hcu.edu.tw",
+        "participant_id": "P1",
+        "role": "student",
+        "created_at": store.now(),
+        "expires_at": store.now(),
+        "last_seen_at": store.now(),
+    })
+    assert risk.append_rows_calls == before_risk + 1
+    assert auth.append_rows_calls == before_auth + 1
+
+
+def test_finish_session_flushes_buffered_chat_and_session(monkeypatch):
+    monkeypatch.setattr("src.data_store.SHEETS_FLUSH_INTERVAL_SECONDS", 3600)
+    store, _ = _fake_sheets_store()
+    sessions = store.worksheets["Sessions"]
+    chat = store.worksheets["ChatLogs"]
+    store.start_session({"session_id": "S1", "participant_id": "P1", "completion_status": "in_progress"})
+    store.append_turn({"session_id": "S1", "turn_index": 1, "content_raw": "hello"})
+    assert sessions.append_rows_calls == 0
+    assert chat.append_rows_calls == 0
+    store.finish_session({"session_id": "S1", "participant_id": "P1", "completion_status": "completed"})
+    assert sessions.append_rows_calls == 1
+    assert sessions.batch_update_calls == 1
+    assert chat.append_rows_calls == 1
+    assert store.session_turns("S1")[0]["content_raw"] == "hello"
+

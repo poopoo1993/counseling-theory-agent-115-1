@@ -163,13 +163,17 @@ class GeminiService:
         model_name: str,
         fallback_models: Sequence[str] = (),
         on_model_used: Callable[[str], None] | None = None,
+        use_browser_router: bool = False,
     ):
         if not api_key or not api_key.strip():
             raise ValueError("Gemini API Key 不可空白。")
         self.client = genai.Client(api_key=api_key.strip())
+        self.api_key = api_key.strip()
         self.model_name = canonical_model_name(model_name)
         self.fallback_models = sanitize_fallback_models(fallback_models, self.model_name)
         self.on_model_used = on_model_used
+        self.use_browser_router = bool(use_browser_router)
+        self.last_latency_ms = 0
 
     def _models_to_try(self) -> list[str]:
         ordered: list[str] = []
@@ -214,7 +218,22 @@ class GeminiService:
         response_json: bool = False,
         thinking_level: str = "low",
         attempts: int = 3,
+        call_id: str | None = None,
     ) -> str:
+        if getattr(self, "use_browser_router", False):
+            from .gemini_router import generate_via_browser
+            return generate_via_browser(
+                self,
+                prompt,
+                call_id=str(call_id or "gemini"),
+                system_instruction=system_instruction,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                response_json=response_json,
+                thinking_level=thinking_level,
+                attempts=attempts,
+            )
+        started = time.perf_counter()
         last_error: Exception | None = None
         models = self._models_to_try()
         for model_index, model_name in enumerate(models):
@@ -240,6 +259,7 @@ class GeminiService:
                     self.model_name = model_name
                     if self.on_model_used is not None:
                         self.on_model_used(model_name)
+                    self.last_latency_ms = int((time.perf_counter() - started) * 1000)
                     return text
                 except Exception as exc:  # SDK 的錯誤型別會隨版本調整，統一在此重試
                     last_error = exc
@@ -254,7 +274,7 @@ class GeminiService:
                     raise RuntimeError(format_gemini_error(exc)) from exc
         raise RuntimeError(format_gemini_error(last_error or RuntimeError("未知錯誤"))) from last_error
 
-    def validate_key(self) -> None:
+    def validate_key(self, call_id: str | None = None) -> None:
         result = self.generate_text(
             "只回覆 OK。",
             system_instruction="這是 API 連線測試。",
@@ -262,6 +282,7 @@ class GeminiService:
             max_output_tokens=256,
             thinking_level="low",
             attempts=3,
+            call_id=call_id or "validate",
         )
         if "OK" not in result.upper():
             raise RuntimeError("API Key 可呼叫，但模型未完成預期的連線測試。")

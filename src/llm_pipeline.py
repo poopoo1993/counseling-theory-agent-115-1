@@ -26,6 +26,7 @@ def create_counseling_plan(
     prior_snapshot: dict[str, Any] | None = None,
     prior_plan: dict[str, Any] | None = None,
     prior_analysis: dict[str, Any] | None = None,
+    call_id: str | None = None,
 ) -> dict[str, Any]:
     raw = service.generate_text(
         build_counseling_plan_prompt(
@@ -42,6 +43,7 @@ def create_counseling_plan(
         temperature=0.65,
         max_output_tokens=1500,
         response_json=True,
+        call_id=call_id,
     )
     plan = parse_json_response(raw)
     plan.setdefault("mode", mode)
@@ -60,6 +62,7 @@ def analyze_chat(
     turns: list[dict[str, Any]],
     latest_student_message: str,
     difficulty: str = "",
+    call_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         raw = service.generate_text(
@@ -77,9 +80,13 @@ def analyze_chat(
             temperature=0.1,
             max_output_tokens=1600,
             response_json=True,
+            call_id=call_id,
         )
         return parse_json_response(raw)
-    except Exception:
+    except Exception as exc:
+        from .gemini_router import GeminiRouterPending
+        if isinstance(exc, GeminiRouterPending):
+            raise
         return dict(prior_analysis or {})
 
 
@@ -96,6 +103,7 @@ def generate_chat_reply(
     counseling_plan: dict[str, Any] | None,
     chat_analysis: dict[str, Any] | None,
     is_opening: bool,
+    call_id: str | None = None,
 ) -> tuple[str, int]:
     system, prompt = build_dialogue_prompt(
         mode=mode,
@@ -115,8 +123,9 @@ def generate_chat_reply(
         system_instruction=system,
         temperature=0.55,
         max_output_tokens=550,
+        call_id=call_id,
     )
-    latency = int((time.perf_counter() - started) * 1000)
+    latency = int(getattr(service, "last_latency_ms", 0) or ((time.perf_counter() - started) * 1000))
     return response, latency
 
 
@@ -131,6 +140,7 @@ def generate_thought_coach_reply(
     example_replies: list[str],
     prior_notes: list[dict[str, Any]],
     latest_thought: str,
+    call_id: str | None = None,
 ) -> str:
     system, prompt = build_thought_coach_prompt(
         mode=mode,
@@ -147,4 +157,5 @@ def generate_thought_coach_reply(
         system_instruction=system,
         temperature=0.35,
         max_output_tokens=450,
+        call_id=call_id,
     )
