@@ -15,10 +15,6 @@ def now_iso(timezone: str) -> str:
     return datetime.now(ZoneInfo(timezone)).isoformat(timespec="seconds")
 
 
-def new_anonymous_participant_id() -> str:
-    return "P-ANON-" + uuid.uuid4().hex[:12].upper()
-
-
 def new_session(
     *,
     participant_id: str,

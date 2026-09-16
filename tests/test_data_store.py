@@ -109,35 +109,28 @@ def test_sessions_schema_includes_research_consent():
     from src.data_store import SCHEMAS
 
     assert "research_consent" in SCHEMAS["Sessions"]
+    assert "AnonymousSessions" in SCHEMAS
+    assert "AnonymousChatLogs" in SCHEMAS
+    assert "participant_id" not in SCHEMAS["AnonymousSessions"]
+    assert "participant_id" not in SCHEMAS["AnonymousChatLogs"]
 
 
-def test_anonymous_participant_id_is_random_and_prefixed():
-    from src.session_service import new_anonymous_participant_id
-
-    first = new_anonymous_participant_id()
-    second = new_anonymous_participant_id()
-    assert first.startswith("P-ANON-")
-    assert second.startswith("P-ANON-")
-    assert first != second
-    assert len(first) == len("P-ANON-") + 12
-    assert all(ch in "0123456789ABCDEF" for ch in first.removeprefix("P-ANON-"))
-
-
-def test_reassign_session_participant_unlinks_identity_and_keeps_process(tmp_path):
-    from src.session_service import new_anonymous_participant_id
-
+def test_save_anonymous_transcript_keeps_process_off_identity(tmp_path):
     store = SqliteStore(str(tmp_path / "anon.sqlite"), "Asia/Taipei")
     student = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
     store.start_session({
         "session_id": "S-anon",
         "conversation_thread_id": "T-keep",
         "participant_id": student,
-        "case_id": "case-1",
         "research_consent": "anonymous",
         "completion_status": "completed",
-        "started_at": "2026-09-15T21:00:00+08:00",
-        "ended_at": "2026-09-15T21:08:00+08:00",
+        "started_at": "2026-09-16T11:00:00+08:00",
+        "ended_at": "2026-09-16T11:08:00+08:00",
         "duration_seconds": "480",
+        "mode": "experience",
+        "school_id": "cbt",
+        "selected_techniques": ["automatic_thoughts"],
+        "selected_technique_names": ["辨識自動化思考"],
     })
     store.append_turn({
         "turn_id": "t1",
@@ -145,64 +138,54 @@ def test_reassign_session_participant_unlinks_identity_and_keeps_process(tmp_pat
         "conversation_thread_id": "T-keep",
         "participant_id": student,
         "turn_index": 1,
+        "speaker_role": "student_client",
         "content_raw": "晤談內容",
-        "timestamp": "2026-09-15T21:01:00+08:00",
+        "timestamp": "2026-09-16T11:01:00+08:00",
     })
-    store.save_thread({
-        "conversation_thread_id": "T-keep",
-        "participant_id": student,
-        "status": "active",
-        "updated_at": store.now(),
-        "last_session_id": "previous",
-        "recent_turns": [{"content_raw": "不應被此次改掛"}],
-    })
-    anon = new_anonymous_participant_id()
-    store.reassign_session_participant("S-anon", anon)
-    session = next(row for row in store.all_records("Sessions") if row["session_id"] == "S-anon")
-    turn = store.session_turns("S-anon")[0]
-    assert session["participant_id"] == anon
-    assert session["conversation_thread_id"] == ""
-    assert session["case_id"] == ""
-    assert turn["participant_id"] == anon
-    assert turn["conversation_thread_id"] == ""
-    assert turn["content_raw"] == "晤談內容"
-    assert turn["timestamp"] == "2026-09-15T21:01:00+08:00"
-    assert store.count_sessions(student) == 0
-    assert all(row["participant_id"] != anon for row in store.all_records("IdentityMap"))
-    thread = store.list_threads(student)[0]
-    assert thread["conversation_thread_id"] == "T-keep"
-    assert thread["participant_id"] == student
+    anon_id = store.save_anonymous_transcript(
+        store.all_records("Sessions")[0],
+        store.session_turns("S-anon"),
+    )
+    store.purge_session_transcript("S-anon")
+    identified = store.all_records("Sessions")[0]
+    assert identified["participant_id"] == student
+    assert identified["research_consent"] == "anonymous"
+    assert store.session_turns("S-anon") == []
+    anon_session = store.all_records("AnonymousSessions")[0]
+    assert anon_session["anonymous_session_id"] == anon_id
+    assert "participant_id" not in anon_session
+    turns = store.anonymous_session_turns(anon_id)
+    assert turns[0]["content_raw"] == "晤談內容"
+    assert turns[0]["timestamp"] == "2026-09-16T11:01:00+08:00"
+    assert "participant_id" not in turns[0]
 
 
-def test_memory_store_reassign_session_participant_unlinks_thread():
-    from src.session_service import new_anonymous_participant_id
-
+def test_memory_store_saves_anonymous_transcript_apart_from_chatlogs():
     store = MemoryStore("Asia/Taipei")
     student = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
-    store.start_session({
-        "session_id": "S-mem",
-        "conversation_thread_id": "T-mem",
-        "participant_id": student,
-        "case_id": "case-mem",
-        "research_consent": "anonymous",
-    })
     store.append_turn({
-        "turn_id": "tm1",
         "session_id": "S-mem",
-        "conversation_thread_id": "T-mem",
         "participant_id": student,
         "turn_index": 1,
-        "content_raw": "匿名應保留",
-        "timestamp": "2026-09-15T21:02:00+08:00",
+        "speaker_role": "ai_counselor",
+        "content_raw": "匿名應另表保留",
+        "timestamp": "2026-09-16T11:02:00+08:00",
     })
-    anon = new_anonymous_participant_id()
-    store.reassign_session_participant("S-mem", anon)
-    session = store.all_records("Sessions")[0]
-    turn = store.session_turns("S-mem")[0]
-    assert session["participant_id"] == anon
-    assert session["conversation_thread_id"] == ""
-    assert turn["participant_id"] == anon
-    assert turn["content_raw"] == "匿名應保留"
+    anon_id = store.save_anonymous_transcript(
+        {
+            "started_at": "2026-09-16T11:00:00+08:00",
+            "ended_at": "2026-09-16T11:08:00+08:00",
+            "duration_seconds": "480",
+            "mode": "experience",
+            "school_id": "cbt",
+        },
+        store.session_turns("S-mem"),
+    )
+    store.purge_session_transcript("S-mem")
+    assert store.session_turns("S-mem") == []
+    turns = store.anonymous_session_turns(anon_id)
+    assert turns[0]["content_raw"] == "匿名應另表保留"
+    assert store.all_records("AnonymousSessions")[0]["anonymous_session_id"] == anon_id
 
 
 def test_memory_store_preserves_identity_thread_and_raw_turn():

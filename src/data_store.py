@@ -1,6 +1,6 @@
 """Persistent research/login store. Production uses SQLite; Sheets code remains unused.
 
-API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。若願意但選擇不記名，則將 Sessions／ChatLogs 改掛到 P-ANON-* 並切斷 thread 關聯。
+API Key 永遠不會傳入此模組。原始逐輪內容只新增、不覆寫；體驗模式若學生不同意作為研究素材，則刪除該 Session 的 ChatLogs。若願意但勾選匿名，晤談過程另存 AnonymousSessions／AnonymousChatLogs，不含帳號或 thread 關聯。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from .config import DEFAULT_LOGIN_ALLOWLIST, DEFAULT_SETTINGS, DEFAULT_TEACHER_EMAILS
@@ -33,6 +33,15 @@ SCHEMAS: dict[str, list[str]] = {
         "turn_id", "session_id", "conversation_thread_id", "participant_id", "turn_index",
         "speaker_role", "speaker_id", "content_raw", "nonverbal_cues", "timestamp",
         "stage_at_turn", "skill_labels", "selected_skill_match", "latency_ms", "error_flag",
+    ],
+    "AnonymousSessions": [
+        "anonymous_session_id", "started_at", "ended_at", "duration_seconds", "mode",
+        "school_id", "selected_techniques", "selected_technique_names", "theme",
+        "difficulty", "model_name", "prompt_version", "created_at",
+    ],
+    "AnonymousChatLogs": [
+        "turn_id", "anonymous_session_id", "turn_index", "speaker_role", "content_raw",
+        "nonverbal_cues", "timestamp", "latency_ms", "error_flag",
     ],
     "Threads": [
         "conversation_thread_id", "participant_id", "mode", "continuation_role", "school_id",
@@ -446,28 +455,44 @@ class GoogleSheetsStore(WhitelistMixin):
         self._delete_by_key("Assessments", "session_id", sid)
         self._delete_by_key("SkillEvents", "session_id", sid)
 
-    def reassign_session_participant(self, session_id: str, participant_id: str) -> None:
-        sid = str(session_id or "")
-        pid = str(participant_id or "")
-        if not sid or not pid:
-            return
-        for row in self.all_records("Sessions"):
-            if str(row.get("session_id")) == sid:
-                updated = dict(row)
-                updated["participant_id"] = pid
-                updated["conversation_thread_id"] = ""
-                updated["case_id"] = ""
-                self._upsert_by_key("Sessions", "session_id", sid, updated)
-                break
-        for row in self.all_records("ChatLogs"):
-            if str(row.get("session_id")) != sid:
-                continue
-            updated = dict(row)
-            updated["participant_id"] = pid
-            updated["conversation_thread_id"] = ""
-            turn_id = str(updated.get("turn_id") or "") or str(uuid.uuid4())
-            updated["turn_id"] = turn_id
-            self._upsert_by_key("ChatLogs", "turn_id", turn_id, updated)
+    def save_anonymous_transcript(self, session: Mapping[str, Any], turns: Sequence[Mapping[str, Any]]) -> str:
+        anon_id = str(uuid.uuid4())
+        self.append("AnonymousSessions", {
+            "anonymous_session_id": anon_id,
+            "started_at": session.get("started_at", ""),
+            "ended_at": session.get("ended_at", ""),
+            "duration_seconds": session.get("duration_seconds", ""),
+            "mode": session.get("mode", ""),
+            "school_id": session.get("school_id", ""),
+            "selected_techniques": session.get("selected_techniques", []),
+            "selected_technique_names": session.get("selected_technique_names", []),
+            "theme": session.get("theme", ""),
+            "difficulty": session.get("difficulty", ""),
+            "model_name": session.get("model_name", ""),
+            "prompt_version": session.get("prompt_version", ""),
+            "created_at": self.now(),
+        })
+        for turn in turns:
+            self.append("AnonymousChatLogs", {
+                "turn_id": str(uuid.uuid4()),
+                "anonymous_session_id": anon_id,
+                "turn_index": turn.get("turn_index", ""),
+                "speaker_role": turn.get("speaker_role", ""),
+                "content_raw": turn.get("content_raw", ""),
+                "nonverbal_cues": turn.get("nonverbal_cues", []),
+                "timestamp": turn.get("timestamp", ""),
+                "latency_ms": turn.get("latency_ms", ""),
+                "error_flag": turn.get("error_flag", ""),
+            })
+        return anon_id
+
+    def anonymous_session_turns(self, anonymous_session_id: str) -> list[dict[str, Any]]:
+        sid = str(anonymous_session_id or "")
+        rows = [
+            row for row in self.all_records("AnonymousChatLogs")
+            if str(row.get("anonymous_session_id")) == sid
+        ]
+        return sorted(rows, key=lambda row: int(row.get("turn_index", 0) or 0))
 
     def get_or_create_participant(self, email: str, role: str, participant_salt: str) -> str:
         normalized = email.strip().lower()
@@ -595,7 +620,8 @@ class MemoryStore(WhitelistMixin, LoginSessionMixin):
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
     purge_session_transcript = GoogleSheetsStore.purge_session_transcript
-    reassign_session_participant = GoogleSheetsStore.reassign_session_participant
+    save_anonymous_transcript = GoogleSheetsStore.save_anonymous_transcript
+    anonymous_session_turns = GoogleSheetsStore.anonymous_session_turns
 
 
 class SqliteStore(WhitelistMixin, LoginSessionMixin):
@@ -684,21 +710,6 @@ class SqliteStore(WhitelistMixin, LoginSessionMixin):
                 (str(value),),
             )
 
-    def reassign_session_participant(self, session_id: str, participant_id: str) -> None:
-        sid = str(session_id or "")
-        pid = str(participant_id or "")
-        if not sid or not pid:
-            return
-        with self.conn:
-            self.conn.execute(
-                'UPDATE "Sessions" SET "participant_id" = ?, "conversation_thread_id" = ?, "case_id" = ? WHERE "session_id" = ?',
-                (pid, "", "", sid),
-            )
-            self.conn.execute(
-                'UPDATE "ChatLogs" SET "participant_id" = ?, "conversation_thread_id" = ? WHERE "session_id" = ?',
-                (pid, "", sid),
-            )
-
     get_or_create_participant = GoogleSheetsStore.get_or_create_participant
     start_session = GoogleSheetsStore.start_session
     finish_session = GoogleSheetsStore.finish_session
@@ -713,4 +724,6 @@ class SqliteStore(WhitelistMixin, LoginSessionMixin):
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
     purge_session_transcript = GoogleSheetsStore.purge_session_transcript
+    save_anonymous_transcript = GoogleSheetsStore.save_anonymous_transcript
+    anonymous_session_turns = GoogleSheetsStore.anonymous_session_turns
 

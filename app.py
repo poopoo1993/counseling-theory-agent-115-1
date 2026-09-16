@@ -42,7 +42,7 @@ from src.prompts import (
     uses_planner_llm,
 )
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
-from src.session_service import finish_session, new_anonymous_participant_id, new_session, new_turn
+from src.session_service import finish_session, new_session, new_turn
 from src.theory_library import PRACTICE_THEMES, SCHOOLS, get_school, get_techniques, validate_selected_techniques
 from src.transcript import make_transcript_txt, safe_filename
 from src.ui import (
@@ -1007,16 +1007,19 @@ def request_experience_research_consent() -> None:
 @st.dialog("是否作為研究素材", dismissible=False)
 def _open_experience_research_consent() -> None:
     st.markdown("這次你擔任個案。是否願意將此次晤談作為教學研究素材？")
-    st.caption("不願意：只留完成紀錄，不保存晤談過程、示範解析或諮商師原句。")
+    st.markdown(
+        """
+| 選擇 | 說明 |
+| --- | --- |
+| 願意 | 保存可連結你帳號的晤談過程與示範解析。 |
+| 願意並勾選匿名 | 你的帳號只留完成紀錄；晤談過程另存不記名資料表，只留過程與時間。 |
+| 不願意 | 只留完成紀錄，不保存晤談過程、示範解析或諮商師原句。 |
+"""
+    )
     keep_col, drop_col = st.columns(2, gap="small")
     with keep_col:
         willing = st.button("願意", type="primary", use_container_width=True)
-        anonymous = st.checkbox(
-            "以不記名方式保存（只留晤談過程與時間，不連結我的帳號）",
-            key="experience_research_anonymous",
-        )
-        if anonymous:
-            st.caption("你的帳號會依「不願意」留存；晤談過程另以不記名與時間紀錄保存。")
+        anonymous = st.checkbox("匿名", key="experience_research_anonymous")
         if willing:
             finalize_session(consent="anonymous" if anonymous else "yes")
             st.rerun()
@@ -1049,18 +1052,9 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
             "next_session_focus": [],
         }
         persist_thread_state("active", include_turns=False)
-        if chosen == "no":
-            STORE.purge_session_transcript(session["session_id"])
-        else:
-            original_pid = session["participant_id"]
-            original_thread = str(session.get("conversation_thread_id") or "")
-            STORE.reassign_session_participant(session["session_id"], new_anonymous_participant_id())
-            stub = dict(session)
-            stub["session_id"] = str(uuid.uuid4())
-            stub["participant_id"] = original_pid
-            stub["conversation_thread_id"] = original_thread
-            stub["research_consent"] = "no"
-            STORE.start_session(stub)
+        if chosen == "anonymous":
+            STORE.save_anonymous_transcript(session, st.session_state.turns)
+        STORE.purge_session_transcript(session["session_id"])
         st.session_state.turns = []
         st.session_state.turn_reviews = []
         st.session_state.coach_thoughts = []
@@ -1158,7 +1152,7 @@ def render_feedback(settings: dict[str, str]) -> None:
             if consent == "no":
                 st.caption("依你的選擇，本次只留下完成紀錄，未保存晤談過程、示範解析或諮商師原句。")
             elif consent == "anonymous":
-                st.caption("已以不記名方式保存晤談過程與時間。你的帳號只留下與「不願意」相同的完成紀錄，不含諮商過程。")
+                st.caption("已將晤談過程以不記名方式另存。你的帳號只留下完成紀錄，不含諮商過程。")
             else:
                 st.caption("你剛才擔任個案。逐字稿與示範解析已保存，之後可續談同一位 AI 諮商師。")
         else:
@@ -1420,6 +1414,39 @@ def _school_display_name(school_id: str) -> str:
         return str(school_id or "")
 
 
+def teacher_anonymous_panel() -> None:
+    st.markdown('<p class="ct-kicker">不記名晤談</p>', unsafe_allow_html=True)
+    st.markdown("**匿名晤談紀錄**")
+    st.caption("這些紀錄不含 Email、participant_id 或續談 thread，無法對回學生帳號。")
+    rows = STORE.all_records("AnonymousSessions")
+    if not rows:
+        with st.container(border=True):
+            render_empty_state("目前尚無匿名晤談", "學生在體驗結束時勾選「匿名」後，晤談過程會出現在這裡。")
+        return
+    display = pd.DataFrame(rows)
+    columns = [
+        c for c in [
+            "started_at", "ended_at", "duration_seconds", "mode", "school_id",
+            "selected_technique_names", "difficulty", "anonymous_session_id",
+        ]
+        if c in display.columns
+    ]
+    shown = display[columns].copy()
+    if "school_id" in shown.columns:
+        shown["school_id"] = shown["school_id"].map(_school_display_name)
+    st.dataframe(shown, use_container_width=True, hide_index=True)
+    session_ids = [str(row.get("anonymous_session_id") or "") for row in rows]
+    chosen = st.selectbox("查看單次匿名晤談", session_ids, format_func=lambda x: f"{x[:8]}…")
+    row = next((item for item in rows if str(item.get("anonymous_session_id")) == chosen), {})
+    render_meta_grid([
+        ("學派", _school_display_name(str(row.get("school_id", "")))),
+        ("模式", mode_label(str(row.get("mode", "")))),
+        ("開始時間", str(row.get("started_at", "") or "")),
+    ])
+    st.markdown("**逐字稿**")
+    render_transcript(STORE.anonymous_session_turns(chosen))
+
+
 def teacher_dashboard() -> None:
     apply_theme("teacher")
     show_online_people()
@@ -1428,7 +1455,7 @@ def teacher_dashboard() -> None:
         st.error("此帳號沒有教師後台權限。")
         return
     settings = settings_with_defaults()
-    tab1, tab2, tab3, tab4 = st.tabs(["學生進度與逐字稿", "登入白名單", "開放設定", "研究資料匯出"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["學生進度與逐字稿", "匿名晤談", "登入白名單", "開放設定", "研究資料匯出"])
     with tab1:
         sessions = STORE.all_records("Sessions")
         identities = STORE.all_records("IdentityMap")
@@ -1439,34 +1466,29 @@ def teacher_dashboard() -> None:
             sdf = pd.DataFrame(sessions)
             idf = pd.DataFrame(identities)[["participant_id", "email"]] if identities else pd.DataFrame(columns=["participant_id", "email"])
             merged = sdf.merge(idf, on="participant_id", how="left")
-            identified = merged[~merged["participant_id"].astype(str).str.startswith("P-ANON-")]
             completed = merged[merged["completion_status"].isin(["completed", "safety_stopped"])]
             c1, c2, c3 = st.columns(3, gap="medium")
-            c1.metric("學生人數", int(identified["participant_id"].nunique()) if not identified.empty else 0)
+            c1.metric("學生人數", int(merged["participant_id"].nunique()))
             c2.metric("Session 數", len(merged))
             durations = pd.to_numeric(merged.get("duration_seconds", pd.Series(dtype=float)), errors="coerce").fillna(0)
             c3.metric("累計練習分鐘", f"{durations.sum()/60:.1f}")
-            email_options = ["全部"] + sorted(str(x) for x in identified["email"].dropna().unique())
+            email_options = ["全部"] + sorted(str(x) for x in merged["email"].dropna().unique())
             selected_email = st.selectbox("依學校 Email 篩選", email_options)
             shown = completed if selected_email == "全部" else completed[completed["email"] == selected_email]
             columns = [c for c in ["email", "started_at", "mode", "school_id", "selected_technique_names", "duration_seconds", "completion_status", "research_consent", "session_id"] if c in shown.columns]
             display = shown[columns].copy()
-            consent_values = shown["research_consent"].astype(str) if "research_consent" in shown.columns else pd.Series([""] * len(shown), index=shown.index)
             if "research_consent" in display.columns:
-                display["research_consent"] = consent_values.map(
+                display["research_consent"] = display["research_consent"].map(
                     lambda x: {"yes": "同意", "no": "未同意", "anonymous": "匿名"}.get(str(x), "—")
                 )
-            if "email" in display.columns:
-                display.loc[consent_values.eq("anonymous"), "email"] = ""
             st.dataframe(display, use_container_width=True, hide_index=True)
             if not shown.empty:
                 session_ids = list(shown["session_id"].astype(str))
                 chosen = st.selectbox("查看單次 Session", session_ids, format_func=lambda x: f"{x[:8]}…")
                 row = shown[shown["session_id"].astype(str) == chosen].iloc[0].to_dict()
                 consent = str(row.get("research_consent") or "")
-                student_label = "不記名" if consent == "anonymous" else str(row.get("email", "") or "")
                 render_meta_grid([
-                    ("學生", student_label),
+                    ("學生", str(row.get("email", "") or "")),
                     ("學派", _school_display_name(str(row.get("school_id", "")))),
                     ("模式", mode_label(str(row.get("mode", "")))),
                 ])
@@ -1474,6 +1496,8 @@ def teacher_dashboard() -> None:
                 st.markdown("**逐字稿**")
                 if consent == "no":
                     render_empty_state("學生未同意作為研究素材", "本次體驗只留下完成紀錄，不含諮商過程，也不會出現在研究匯出的對話資料中。")
+                elif consent == "anonymous":
+                    render_empty_state("晤談過程已不記名另存", "此帳號只留下完成紀錄。匿名晤談請到「匿名晤談」分頁查看，無法對回這位學生。")
                 else:
                     render_transcript(turns)
                 thread_id = str(row.get("conversation_thread_id", ""))
@@ -1506,17 +1530,19 @@ def teacher_dashboard() -> None:
                         )
                         st.success("教師評量已另存，不會覆寫 AI 原始結果。")
     with tab2:
-        teacher_whitelist_panel()
+        teacher_anonymous_panel()
     with tab3:
-        teacher_settings_panel(settings)
+        teacher_whitelist_panel()
     with tab4:
+        teacher_settings_panel(settings)
+    with tab5:
         with st.container(border=True):
             st.markdown('<p class="ct-kicker">研究匯出</p>', unsafe_allow_html=True)
             st.markdown("**下載完整後台 CSV 壓縮檔**")
             st.caption(
-                "匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。"
+                "匯出包含 whitelist、IdentityMap、Sessions、ChatLogs、AnonymousSessions、AnonymousChatLogs、Threads、Assessments、SkillEvents、TeacherGrades、Settings 與 RiskEvents。"
                 "whitelist 與 IdentityMap 含 Email，研究去識別化時應單獨保管或移除。"
-                "體驗模式選「不願意」的對話資料不會匯出；選不記名的晤談過程會以 P-ANON 匯出。"
+                "體驗模式選「不願意」的對話資料不會匯出；勾選匿名的晤談過程在 AnonymousSessions／AnonymousChatLogs。"
             )
             try:
                 payload = export_research_zip()

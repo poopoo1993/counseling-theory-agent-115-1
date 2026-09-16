@@ -92,6 +92,8 @@ app_password = "Gmail應用程式密碼"
 - IdentityMap
 - Sessions
 - ChatLogs
+- AnonymousSessions
+- AnonymousChatLogs
 - Threads
 - Assessments
 - SkillEvents

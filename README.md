@@ -13,7 +13,7 @@
 - 括弧非語言訊息，例如「（視線移開）」；原始文字完整保留。
 - 白名單 Email + OTP 登入；教師可在後台新增或停用帳號。
 - 學生自行輸入 Gemini API Key；Key 僅存於瀏覽器工作階段，不寫入 SQLite、逐字稿或研究資料。
-- SQLite 後台：whitelist、身分對照、Sessions、ChatLogs、Threads（含 counseling_plan／chat_analysis）、Assessments、SkillEvents、TeacherGrades、Settings、RiskEvents。
+- SQLite 後台：whitelist、身分對照、Sessions、ChatLogs、AnonymousSessions、AnonymousChatLogs、Threads（含 counseling_plan／chat_analysis）、Assessments、SkillEvents、TeacherGrades、Settings、RiskEvents。
 - 教師可依學校 Email 查看學生次數、時間、學派、逐字稿、AI 回饋及另存人工成績。
 - 學生可選擇下載當次 UTF-8 TXT 逐字稿。
 - 教師可匯出全部後台資料為多份 CSV 的 ZIP。

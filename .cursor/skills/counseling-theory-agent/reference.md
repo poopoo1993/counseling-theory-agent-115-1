@@ -55,15 +55,19 @@ Teacher dashboard lists sessions with `completed` or `safety_stopped`.
 
 ## Sheets / SQLite (`SCHEMAS`)
 
-SQLite tables (same names as former worksheets). Append-only research events: ChatLogs, Assessments, SkillEvents, TeacherGrades, RiskEvents. Upserts: whitelist (`email`), IdentityMap (`participant_id`), Sessions (`session_id`), Threads (`conversation_thread_id`), Settings (`key`).
+SQLite tables (same names as former worksheets). Append-only research events: ChatLogs, AnonymousSessions, AnonymousChatLogs, Assessments, SkillEvents, TeacherGrades, RiskEvents. Upserts: whitelist (`email`), IdentityMap (`participant_id`), Sessions (`session_id`), Threads (`conversation_thread_id`), Settings (`key`).
 
 **whitelist:** `email`, `role`, `enabled`, `created_at`, `password_hash` (omit `password_hash` from research ZIP)
 
 **IdentityMap:** `participant_id`, `email`, `created_at`, `last_login_at`, `role`
 
-**Sessions:** `session_id`, `conversation_thread_id`, `participant_id`, `agent_type` (always `theory`), `mode`, `continuation_role`, `started_at`, `ended_at`, `duration_seconds`, `case_id`, `school_id`, `selected_techniques`, `selected_technique_names`, `model_name`, `prompt_version`, `temperature`, `completion_status`, `theme`, `difficulty`, `research_consent` (`yes` / `no` / `anonymous` after experience end-session dialog; empty for practice). `anonymous` rows use `P-ANON-*` and blank `conversation_thread_id`; teacher UI shows 匿名 without email.
+**Sessions:** `session_id`, `conversation_thread_id`, `participant_id`, `agent_type` (always `theory`), `mode`, `continuation_role`, `started_at`, `ended_at`, `duration_seconds`, `case_id`, `school_id`, `selected_techniques`, `selected_technique_names`, `model_name`, `prompt_version`, `temperature`, `completion_status`, `theme`, `difficulty`, `research_consent` (`yes` / `no` / `anonymous` after experience end-session dialog; empty for practice). `anonymous` keeps the student stub without ChatLogs.
 
 **ChatLogs:** `turn_id`, `session_id`, `conversation_thread_id`, `participant_id`, `turn_index`, `speaker_role`, `speaker_id`, `content_raw`, `nonverbal_cues`, `timestamp`, `stage_at_turn`, `skill_labels`, `selected_skill_match`, `latency_ms`, `error_flag`
+
+**AnonymousSessions:** `anonymous_session_id`, `started_at`, `ended_at`, `duration_seconds`, `mode`, `school_id`, `selected_techniques`, `selected_technique_names`, `theme`, `difficulty`, `model_name`, `prompt_version`, `created_at` — no participant_id / email / thread
+
+**AnonymousChatLogs:** `turn_id`, `anonymous_session_id`, `turn_index`, `speaker_role`, `content_raw`, `nonverbal_cues`, `timestamp`, `latency_ms`, `error_flag`
 
 **Threads:** `conversation_thread_id`, `participant_id`, `mode`, `continuation_role`, `school_id`, `school_name`, `selected_techniques`, `selected_technique_names`, `case_id`, `case_data`, `counseling_plan`, `chat_analysis`, `latest_snapshot`, `last_session_id`, `recent_turns`, `difficulty`, `updated_at`, `status`
 
