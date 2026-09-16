@@ -31,6 +31,7 @@ def main() -> int:
         ROOT / ".streamlit" / "secrets.toml.example",
         ROOT / "src" / "data_store.py",
         ROOT / "src" / "prompts.py",
+        ROOT / "src" / "session_flow.py",
     ]
     for path in required:
         if not path.exists():

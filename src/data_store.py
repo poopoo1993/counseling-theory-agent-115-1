@@ -882,6 +882,7 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
         )
 
     def list_threads(self, participant_id: str) -> list[dict[str, Any]]:
+        """Continuation list: `active` only. `in_progress` / `closed` are not resumable here."""
         rows = [
             r for r in self.all_records("Threads")
             if str(r.get("participant_id")) == participant_id and str(r.get("status", "active")) == "active"

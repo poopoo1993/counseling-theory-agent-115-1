@@ -15,6 +15,25 @@ def test_memory_store_preserves_identity_thread_and_raw_turn():
     assert store.list_threads(participant_id)[0]["conversation_thread_id"] == "T1"
 
 
+def test_list_threads_only_returns_active_rows():
+    store = MemoryStore("Asia/Taipei")
+    participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
+    store.save_thread({
+        "conversation_thread_id": "T-progress", "participant_id": participant_id,
+        "mode": "practice", "status": "in_progress", "updated_at": "2026-01-01T00:00:00+08:00",
+    })
+    store.save_thread({
+        "conversation_thread_id": "T-closed", "participant_id": participant_id,
+        "mode": "practice", "status": "closed", "updated_at": "2026-01-02T00:00:00+08:00",
+    })
+    store.save_thread({
+        "conversation_thread_id": "T-active", "participant_id": participant_id,
+        "mode": "practice", "status": "active", "updated_at": "2026-01-03T00:00:00+08:00",
+    })
+    listed = store.list_threads(participant_id)
+    assert [row["conversation_thread_id"] for row in listed] == ["T-active"]
+
+
 def test_sqlite_store_preserves_identity_thread_plan_and_raw_turn(tmp_path):
     store = SqliteStore(str(tmp_path / "app.sqlite"), "Asia/Taipei")
     store.seed_whitelist(("student@hcu.edu.tw",), ("teacher@hcu.edu.tw",))

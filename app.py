@@ -5,6 +5,7 @@ import time
 import uuid
 import zipfile
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -40,20 +41,21 @@ from src.data_store import (
 from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
 from src.gemini_router import GeminiRouterPending, keep_gemini_router_alive, run_browser_jobs
-from src.llm_pipeline import create_counseling_plan, generate_thought_coach_reply
+from src.llm_pipeline import (
+    build_analyze_job,
+    build_chat_job,
+    build_eval_snapshot_job,
+    build_plan_job,
+    build_thought_job,
+)
 from src.prompts import (
-    analysis_for_chatbot,
-    build_chat_analysis_prompt,
-    build_dialogue_prompt,
-    build_experience_analysis_prompt,
-    build_practice_evaluator_prompt,
-    build_snapshot_prompt,
     case_data_from_plan,
     live_plan_visible,
     thought_coach_visible,
     turn_review_visible,
     uses_planner_llm,
 )
+from src import session_flow as flow
 from src.safety import detect_immediate_risk, detect_pii, redact_for_preview, safety_message
 from src.session_service import finish_session, new_session, new_turn
 from src.theory_library import PRACTICE_THEMES, SCHOOLS, get_school, get_techniques, validate_selected_techniques
@@ -292,13 +294,7 @@ def persist_thread_state(status: str = "in_progress", *, include_turns: bool = T
         case_data = {}
         plan = {}
         last_session_id = ""
-        existing = next(
-            (
-                thread for thread in STORE.list_threads(session["participant_id"])
-                if str(thread.get("conversation_thread_id")) == str(session["conversation_thread_id"])
-            ),
-            None,
-        )
+        existing = _find_thread(str(session["conversation_thread_id"]))
         previous = str((existing or {}).get("last_session_id") or "")
         if previous and previous != str(session["session_id"]):
             last_session_id = previous
@@ -616,6 +612,127 @@ def store_turn(turn: dict[str, Any]) -> None:
     STORE.append_turn(turn)
 
 
+def _find_thread(thread_id: str) -> dict[str, Any] | None:
+    wanted = str(thread_id or "").strip()
+    if not wanted:
+        return None
+    try:
+        rows = STORE.all_records("Threads")
+    except Exception:
+        return None
+    for row in rows:
+        if str(row.get("conversation_thread_id")) == wanted:
+            return row
+    return None
+
+
+def _dialogue_turns() -> list[dict[str, Any]]:
+    return list(st.session_state.prior_turns_context or []) + list(st.session_state.turns or [])
+
+
+def _ending_session() -> bool:
+    return flow.phase(st.session_state) == flow.ENDING or bool(st.session_state.get("pending_finalize"))
+
+
+def _enqueue_opening_chat() -> None:
+    session = st.session_state.active_session or {}
+    session_id = str(session.get("session_id") or "")
+    if not session_id or _has_ai_turn():
+        return
+    flow.set_phase(st.session_state, flow.OPENING)
+    flow.enqueue(st.session_state, build_chat_job(
+        mode=session["mode"],
+        school_id=session["school_id"],
+        selected_ids=session["selected_techniques"],
+        turns=_dialogue_turns(),
+        latest_student_message="",
+        case_data=st.session_state.case_data,
+        continuation_snapshot=st.session_state.continuation_snapshot,
+        counseling_plan=st.session_state.counseling_plan,
+        chat_analysis=st.session_state.chat_analysis,
+        is_opening=True,
+        request_id=f"chat-{session_id}-{len(st.session_state.turns or [])}",
+        meta={"has_prior_turns": bool(st.session_state.prior_turns_context)},
+    ))
+
+
+def _reset_live_session_fields() -> None:
+    st.session_state.turns = []
+    st.session_state.turn_reviews = []
+    st.session_state.coach_thoughts = []
+    st.session_state.assessment = None
+    st.session_state.raw_assessment = ""
+
+
+def _commit_new_session(
+    *,
+    mode: str,
+    school_id: str,
+    selected_ids: list[str],
+    theme: str,
+    difficulty: str,
+    plan: dict[str, Any],
+    case_data: dict[str, Any] | None,
+    case_id: str,
+) -> None:
+    service = gemini()
+    session = new_session(
+        participant_id=st.session_state.participant_id,
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        model_name=service.model_name,
+        prompt_version=CONFIG.prompt_version,
+        timezone=CONFIG.timezone,
+        theme=theme,
+        difficulty=difficulty,
+        case_id=case_id,
+    )
+    st.session_state.active_session = session
+    _reset_live_session_fields()
+    st.session_state.case_data = case_data
+    st.session_state.counseling_plan = plan
+    st.session_state.chat_analysis = None
+    st.session_state.continuation_snapshot = None
+    st.session_state.prior_turns_context = []
+    STORE.start_session(session)
+    persist_thread_state("in_progress")
+    flow.set_phase(st.session_state, flow.OPENING)
+
+
+def _commit_continuation(thread: dict[str, Any], selected_ids: list[str], *, plan: dict[str, Any] | None = None) -> None:
+    mode = str(thread["mode"])
+    school_id = str(thread["school_id"])
+    prior_difficulty = str(thread.get("difficulty") or "").strip()
+    difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
+    service = gemini()
+    session = new_session(
+        participant_id=st.session_state.participant_id,
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        model_name=service.model_name,
+        prompt_version=CONFIG.prompt_version,
+        timezone=CONFIG.timezone,
+        theme="續談上次議題",
+        difficulty=difficulty,
+        thread_id=str(thread["conversation_thread_id"]),
+        case_id=str(thread.get("case_id", "student_topic")),
+    )
+    st.session_state.active_session = session
+    _reset_live_session_fields()
+    st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
+    st.session_state.counseling_plan = plan if plan is not None else parse_json_cell(thread.get("counseling_plan"), {})
+    st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
+    st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
+    st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
+    if mode == "practice" and plan is not None:
+        st.session_state.case_data = case_data_from_plan(plan) or st.session_state.case_data
+    STORE.start_session(session)
+    persist_thread_state("in_progress")
+    flow.set_phase(st.session_state, flow.OPENING)
+
+
 def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None) -> None:
     review = (analysis or {}).get("turn_review")
     if not isinstance(review, dict):
@@ -638,95 +755,228 @@ def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None)
     st.session_state.turn_reviews = history
 
 
-def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None:
-    session = st.session_state.active_session
-    turns = st.session_state.prior_turns_context + st.session_state.turns
-    should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
-    session_id = str(session.get("session_id") or "")
-    turn_token = str(len(st.session_state.turns))
-    if is_opening and _has_ai_turn():
+def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
+    validate_selected_techniques(school_id, selected_ids)
+    if _session_in_progress():
         return
-    service = gemini()
-    chat_id = f"chat-{session_id}-{turn_token}"
-    chat_system, chat_prompt = build_dialogue_prompt(
-        mode=session["mode"],
-        school_id=session["school_id"],
-        selected_ids=session["selected_techniques"],
-        turns=turns,
-        latest_student_message=latest_student_message,
-        case_data=st.session_state.case_data,
-        continuation_snapshot=st.session_state.continuation_snapshot,
-        is_opening=is_opening,
-        counseling_plan=st.session_state.counseling_plan,
-        chat_analysis=analysis_for_chatbot(st.session_state.chat_analysis),
+    flow.clear_jobs(st.session_state)
+    flow.set_phase(st.session_state, flow.OPENING)
+    if uses_planner_llm(mode, difficulty):
+        flow.enqueue(st.session_state, build_plan_job(
+            mode=mode,
+            school_id=school_id,
+            selected_ids=selected_ids,
+            theme=theme,
+            difficulty=difficulty,
+            request_id=f"plan-new-{st.session_state.participant_id}-{mode}-{school_id}-{theme}-{difficulty}",
+            meta={"flow": "new"},
+        ))
+        return
+    _commit_new_session(
+        mode=mode,
+        school_id=school_id,
+        selected_ids=selected_ids,
+        theme=theme,
+        difficulty=difficulty,
+        plan={"mode": mode, "school_id": school_id},
+        case_data=None,
+        case_id="student_topic",
     )
-    texts = run_browser_jobs(service, [{
-        "request_id": chat_id,
-        "prompt": chat_prompt,
-        "system_instruction": chat_system,
-        "temperature": 0.55,
-        "max_output_tokens": 550,
-    }])
-    role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
-    store_turn(new_turn(
-        session=session,
-        turn_index=len(st.session_state.turns) + 1,
-        speaker_role=role,
-        content=texts[chat_id],
-        timezone=CONFIG.timezone,
-        latency_ms=int(getattr(service, "last_latency_ms", 0) or 0),
-    ))
-    persist_thread_state("in_progress")
-    if should_analyze:
-        st.session_state.pending_analyze = {
-            "session_id": session_id,
-            "turn_token": turn_token,
-            "latest_student_message": latest_student_message,
-            "session_turn_count": int(turn_token),
-            "ai_turn_index": len(st.session_state.turns),
-        }
-    else:
-        st.session_state.pending_analyze = None
+    _enqueue_opening_chat()
 
 
-def apply_pending_analysis() -> None:
-    pending = st.session_state.get("pending_analyze")
-    if not isinstance(pending, dict):
+def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
+    mode = str(thread["mode"])
+    school_id = str(thread["school_id"])
+    validate_selected_techniques(school_id, selected_ids)
+    thread_id = str(thread["conversation_thread_id"])
+    if _session_in_progress() and str((st.session_state.active_session or {}).get("conversation_thread_id")) == thread_id:
         return
-    session = st.session_state.active_session or {}
-    session_id = str(session.get("session_id") or "")
-    if not session_id or session_id != str(pending.get("session_id") or ""):
-        st.session_state.pending_analyze = None
+    prior_difficulty = str(thread.get("difficulty") or "").strip()
+    difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
+    flow.clear_jobs(st.session_state)
+    flow.set_phase(st.session_state, flow.OPENING)
+    if uses_planner_llm(mode, difficulty):
+        flow.enqueue(st.session_state, build_plan_job(
+            mode=mode,
+            school_id=school_id,
+            selected_ids=selected_ids,
+            theme="續談上次議題",
+            difficulty=difficulty,
+            prior_snapshot=parse_json_cell(thread.get("latest_snapshot"), {}),
+            prior_plan=parse_json_cell(thread.get("counseling_plan"), {}),
+            prior_analysis=parse_json_cell(thread.get("chat_analysis"), {}),
+            request_id=f"plan-cont-{thread_id}",
+            meta={"flow": "continuation", "thread": dict(thread)},
+        ))
         return
-    turn_token = str(pending.get("turn_token") or "")
-    analyze_id = f"analyze-{session_id}-{turn_token}"
-    count = int(pending.get("session_turn_count") or 0)
+    _commit_continuation(thread, selected_ids)
+    _enqueue_opening_chat()
+
+
+def _analyze_turns(meta: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    count = int(meta.get("session_turn_count") or 0)
     session_turns = list(st.session_state.turns or [])[:max(0, count)]
-    turns = list(st.session_state.prior_turns_context or []) + session_turns
-    latest_student_message = str(pending.get("latest_student_message") or "")
-    texts = run_browser_jobs(gemini(), [{
-        "request_id": analyze_id,
-        "prompt": build_chat_analysis_prompt(
+    return session_turns, list(st.session_state.prior_turns_context or []) + session_turns
+
+
+def _materialize_job(job: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = str(job.get("kind") or "")
+    meta = dict(job.get("meta") or {})
+    session = st.session_state.active_session or {}
+    if kind == flow.KIND_PLAN:
+        return flow.browser_jobs(job)
+    if kind == flow.KIND_CHAT:
+        rebuilt = build_chat_job(
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            turns=_dialogue_turns(),
+            latest_student_message=str(meta.get("latest_student_message") or ""),
+            case_data=st.session_state.case_data,
+            continuation_snapshot=st.session_state.continuation_snapshot,
+            counseling_plan=st.session_state.counseling_plan,
+            chat_analysis=st.session_state.chat_analysis,
+            is_opening=bool(meta.get("is_opening")),
+            request_id=str(job.get("request_id") or job.get("id") or ""),
+            meta=meta,
+        )
+        return flow.browser_jobs(rebuilt)
+    if kind == flow.KIND_ANALYZE:
+        _session_turns, turns = _analyze_turns(meta)
+        rebuilt = build_analyze_job(
             mode=session["mode"],
             school_id=session["school_id"],
             selected_ids=session["selected_techniques"],
             counseling_plan=st.session_state.counseling_plan,
             prior_analysis=st.session_state.chat_analysis,
             turns=turns,
-            latest_student_message=latest_student_message,
+            latest_student_message=str(meta.get("latest_student_message") or ""),
             difficulty=str(session.get("difficulty", "")),
-        ),
-        "system_instruction": "你是對話分析引擎，只輸出 JSON。",
-        "temperature": 0.1,
-        "max_output_tokens": 1600,
-        "response_json": True,
-    }])
+            request_id=str(job.get("request_id") or job.get("id") or ""),
+            meta=meta,
+        )
+        return flow.browser_jobs(rebuilt)
+    if kind == flow.KIND_THOUGHT:
+        analysis = st.session_state.chat_analysis or {}
+        examples = analysis.get("example_replies")
+        if not isinstance(examples, list):
+            examples = []
+        rebuilt = build_thought_job(
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            turns=_dialogue_turns(),
+            student_guide=str(analysis.get("student_guide", "")),
+            example_replies=[str(item) for item in examples],
+            prior_notes=list(st.session_state.get("coach_thoughts") or []),
+            latest_thought=str(meta.get("latest_thought") or ""),
+            request_id=str(job.get("request_id") or job.get("id") or ""),
+            meta=meta,
+        )
+        return flow.browser_jobs(rebuilt)
+    if kind == flow.KIND_EVAL_SNAPSHOT:
+        rebuilt = build_eval_snapshot_job(
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            turns=list(st.session_state.turns or []),
+            continuation_snapshot=st.session_state.continuation_snapshot,
+            session_id=str(session.get("session_id") or ""),
+            meta=meta,
+        )
+        return flow.browser_jobs(rebuilt)
+    return flow.browser_jobs(job)
+
+
+def _enqueue_analyze_after_chat(session: dict[str, Any], meta: Mapping[str, Any]) -> None:
+    if not flow.should_analyze_mid_session(
+        difficulty=str(session.get("difficulty", "")),
+        is_opening=bool(meta.get("is_opening")),
+        has_prior_turns=bool(meta.get("has_prior_turns") or st.session_state.prior_turns_context),
+    ):
+        return
+    session_id = str(session.get("session_id") or "")
+    turn_token = str(len(st.session_state.turns or []))
+    latest_student_message = str(meta.get("latest_student_message") or "")
+    flow.enqueue(st.session_state, build_analyze_job(
+        mode=session["mode"],
+        school_id=session["school_id"],
+        selected_ids=session["selected_techniques"],
+        counseling_plan=st.session_state.counseling_plan,
+        prior_analysis=st.session_state.chat_analysis,
+        turns=_dialogue_turns(),
+        latest_student_message=latest_student_message,
+        difficulty=str(session.get("difficulty", "")),
+        request_id=f"analyze-{session_id}-{turn_token}",
+        meta={
+            "session_turn_count": len(st.session_state.turns or []),
+            "latest_student_message": latest_student_message,
+            "ai_turn_index": len(st.session_state.turns or []),
+        },
+    ))
+    flow.set_phase(st.session_state, flow.COACHING)
+
+
+def _apply_plan_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    request_id = str(job.get("request_id") or job.get("id") or "")
+    plan = parse_json_response(texts[request_id])
+    meta = dict(job.get("meta") or {})
+    mode = str(meta.get("mode") or "")
+    school_id = str(meta.get("school_id") or "")
+    selected_ids = list(meta.get("selected_ids") or [])
+    theme = str(meta.get("theme") or "")
+    difficulty = str(meta.get("difficulty") or "")
+    plan.setdefault("mode", mode)
+    plan.setdefault("school_id", school_id)
+    if str(meta.get("flow") or "") == "continuation":
+        _commit_continuation(dict(meta.get("thread") or {}), selected_ids, plan=plan)
+    else:
+        case_data = case_data_from_plan(plan) if mode == "practice" else None
+        case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
+        _commit_new_session(
+            mode=mode,
+            school_id=school_id,
+            selected_ids=selected_ids,
+            theme=theme,
+            difficulty=difficulty,
+            plan=plan,
+            case_data=case_data,
+            case_id=case_id,
+        )
+    _enqueue_opening_chat()
+
+
+def _apply_chat_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    session = st.session_state.active_session or {}
+    request_id = str(job.get("request_id") or job.get("id") or "")
+    meta = dict(job.get("meta") or {})
+    role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
+    store_turn(new_turn(
+        session=session,
+        turn_index=len(st.session_state.turns) + 1,
+        speaker_role=role,
+        content=texts[request_id],
+        timezone=CONFIG.timezone,
+        latency_ms=int(getattr(gemini(), "last_latency_ms", 0) or 0),
+    ))
+    flow.set_phase(st.session_state, flow.LIVE)
+    st.session_state.pending_student_stored = None
+    _enqueue_analyze_after_chat(session, meta)
+
+
+def _apply_analyze_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    session = st.session_state.active_session or {}
+    meta = dict(job.get("meta") or {})
+    request_id = str(job.get("request_id") or job.get("id") or "")
+    session_turns, _turns = _analyze_turns(meta)
+    latest_student_message = str(meta.get("latest_student_message") or "")
     try:
-        st.session_state.chat_analysis = parse_json_response(texts[analyze_id])
+        st.session_state.chat_analysis = parse_json_response(texts[request_id])
     except Exception:
         st.session_state.chat_analysis = dict(st.session_state.chat_analysis or {})
     show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
-    if show_turn_review and session["mode"] == "practice" and latest_student_message:
+    if show_turn_review and session.get("mode") == "practice" and latest_student_message:
         student_index = next(
             (
                 int(turn["turn_index"])
@@ -736,122 +986,196 @@ def apply_pending_analysis() -> None:
             0,
         )
         record_turn_review(student_index, st.session_state.chat_analysis)
-    if show_turn_review and session["mode"] == "experience" and st.session_state.chat_analysis:
-        record_turn_review(int(pending.get("ai_turn_index") or 0), st.session_state.chat_analysis)
-    persist_thread_state("in_progress")
-    st.session_state.pending_analyze = None
+    if show_turn_review and session.get("mode") == "experience" and st.session_state.chat_analysis:
+        record_turn_review(int(meta.get("ai_turn_index") or 0), st.session_state.chat_analysis)
+    if not flow.has_kind(st.session_state, flow.KIND_ANALYZE):
+        flow.set_phase(st.session_state, flow.LIVE)
 
 
-def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
-    validate_selected_techniques(school_id, selected_ids)
-    service = gemini()
-    if _session_in_progress():
-        if st.session_state.get("pending_opening"):
-            generate_ai_turn(is_opening=True)
-            st.session_state.pending_opening = False
-        return
-    if uses_planner_llm(mode, difficulty):
-        plan = create_counseling_plan(
-            service,
-            mode=mode,
-            school_id=school_id,
-            selected_ids=selected_ids,
-            theme=theme,
-            difficulty=difficulty,
-            call_id=f"plan-new-{st.session_state.participant_id}-{mode}-{school_id}-{theme}-{difficulty}",
-        )
-        case_data = case_data_from_plan(plan) if mode == "practice" else None
-        case_id = str(plan.get("case_id") or ("student_topic" if mode != "practice" else f"case-{uuid.uuid4().hex[:8]}"))
+def _apply_thought_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    request_id = str(job.get("request_id") or job.get("id") or "")
+    notes = list(st.session_state.get("coach_thoughts") or [])
+    notes.append({"role": "coach", "content": texts[request_id]})
+    st.session_state.coach_thoughts = notes
+    st.session_state.pending_thought = ""
+    st.session_state.pending_thought_noted = ""
+
+
+def _apply_eval_snapshot_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    session = st.session_state.active_session or {}
+    session_id = str(session.get("session_id") or "")
+    eval_id = f"eval-{session_id}"
+    snapshot_id = f"snapshot-{session_id}"
+    raw = texts.get(eval_id, "")
+    try:
+        parsed = parse_json_response(raw)
+    except Exception as exc:
+        parsed = {
+            "total_score": None,
+            "strengths": [],
+            "improvement_points": [],
+            "encouragement": "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。",
+            "limitations": str(exc),
+        }
+    try:
+        snapshot = parse_json_response(texts.get(snapshot_id, ""))
+    except Exception:
+        snapshot = {
+            "continuation_role": session.get("continuation_role"),
+            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
+            "disclosed_topics": [],
+            "unfinished_issues": [],
+            "next_session_focus": [],
+        }
+    assessment_id = str(st.session_state.setdefault(f"_assessment_id_{session_id}", str(uuid.uuid4())))
+    record = {
+        "assessment_id": assessment_id,
+        "session_id": session_id,
+        "participant_id": session["participant_id"],
+        "mode": session["mode"],
+        "school_id": session["school_id"],
+        "rubric_version": CONFIG.rubric_version,
+        "total_score": parsed.get("total_score", parsed.get("score", "")),
+        "dimension_scores": parsed.get("dimensions", {}),
+        "skill_events": parsed.get("skill_events", parsed.get("technique_explanations", [])),
+        "strengths": parsed.get("strengths", []),
+        "improvement_points": parsed.get("improvement_points", []),
+        "quoted_examples": parsed.get("alternative_responses", []),
+        "next_practice_focus": parsed.get("next_practice_focus", parsed.get("reflection_questions", [])),
+        "encouragement": parsed.get("encouragement", ""),
+        "raw_model_output": raw,
+        "parsed_json": parsed,
+        "created_at": STORE.now(),
+    }
+    if st.session_state.get("_assessment_saved_for") != session_id:
+        STORE.save_assessment(record)
+        st.session_state._assessment_saved_for = session_id
+    st.session_state.assessment = parsed
+    st.session_state.raw_assessment = raw
+    st.session_state.continuation_snapshot = snapshot
+    finished = finish_session(session, CONFIG.timezone, "completed")
+    consent = str((st.session_state.get("pending_finalize") or {}).get("consent") or session.get("research_consent") or "")
+    if finished["mode"] == "experience":
+        finished["research_consent"] = consent if consent in {"yes", "no", "anonymous"} else "yes"
     else:
-        plan = {"mode": mode, "school_id": school_id}
-        case_data = None
-        case_id = "student_topic"
-    session = new_session(
-        participant_id=st.session_state.participant_id,
-        mode=mode,
-        school_id=school_id,
-        selected_ids=selected_ids,
-        model_name=service.model_name,
-        prompt_version=CONFIG.prompt_version,
-        timezone=CONFIG.timezone,
-        theme=theme,
-        difficulty=difficulty,
-        case_id=case_id,
-    )
-    st.session_state.active_session = session
-    st.session_state.turns = []
-    st.session_state.case_data = case_data
-    st.session_state.counseling_plan = plan
-    st.session_state.chat_analysis = None
-    st.session_state.turn_reviews = []
-    st.session_state.coach_thoughts = []
-    st.session_state.continuation_snapshot = None
-    st.session_state.prior_turns_context = []
-    st.session_state.assessment = None
-    STORE.start_session(session)
-    persist_thread_state("in_progress")
-    st.session_state.pending_opening = True
-    generate_ai_turn(is_opening=True)
-    st.session_state.pending_opening = False
+        finished["research_consent"] = ""
+    st.session_state.active_session = finished
+    STORE.finish_session(finished)
+    persist_thread_state(flow.thread_status_for_end(keep_process=True), include_turns=True)
+    st.session_state.pending_finalize = None
+    flow.set_phase(st.session_state, flow.FEEDBACK)
 
 
-def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
-    mode = str(thread["mode"])
-    school_id = str(thread["school_id"])
-    validate_selected_techniques(school_id, selected_ids)
-    prior_difficulty = str(thread.get("difficulty") or "").strip()
-    difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
-    service = gemini()
-    thread_id = str(thread["conversation_thread_id"])
-    if _session_in_progress() and str((st.session_state.active_session or {}).get("conversation_thread_id")) == thread_id:
-        if st.session_state.get("pending_opening"):
-            generate_ai_turn(is_opening=True)
-            st.session_state.pending_opening = False
+def _apply_job_result(job: dict[str, Any], texts: dict[str, str]) -> None:
+    kind = str(job.get("kind") or "")
+    if kind == flow.KIND_PLAN:
+        _apply_plan_result(job, texts)
+    elif kind == flow.KIND_CHAT:
+        _apply_chat_result(job, texts)
+    elif kind == flow.KIND_ANALYZE:
+        _apply_analyze_result(job, texts)
+    elif kind == flow.KIND_THOUGHT:
+        _apply_thought_result(job, texts)
+    elif kind == flow.KIND_EVAL_SNAPSHOT:
+        _apply_eval_snapshot_result(job, texts)
+
+
+def _fail_job(job: dict[str, Any], exc: BaseException) -> None:
+    kind = str(job.get("kind") or "")
+    session = st.session_state.active_session or {}
+    if kind == flow.KIND_CHAT and session:
+        store_turn(new_turn(
+            session=session,
+            turn_index=len(st.session_state.turns) + 1,
+            speaker_role="system",
+            content="本輪模型暫時無法回應，請稍後再試或結束本次晤談。",
+            timezone=CONFIG.timezone,
+            error_flag=str(exc)[:300],
+        ))
+        st.session_state.pending_student_stored = None
+        flow.set_phase(st.session_state, flow.LIVE)
         return
-    session = new_session(
-        participant_id=st.session_state.participant_id,
-        mode=mode,
-        school_id=school_id,
-        selected_ids=selected_ids,
-        model_name=service.model_name,
-        prompt_version=CONFIG.prompt_version,
-        timezone=CONFIG.timezone,
-        theme="續談上次議題",
-        difficulty=difficulty,
-        thread_id=thread_id,
-        case_id=str(thread.get("case_id", "student_topic")),
-    )
-    st.session_state.active_session = session
-    st.session_state.turns = []
-    st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
-    st.session_state.counseling_plan = parse_json_cell(thread.get("counseling_plan"), {})
-    st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
-    st.session_state.turn_reviews = []
-    st.session_state.coach_thoughts = []
-    st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
-    st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
-    st.session_state.assessment = None
-    if uses_planner_llm(mode, difficulty):
-        st.session_state.counseling_plan = create_counseling_plan(
-            service,
-            mode=mode,
-            school_id=school_id,
-            selected_ids=selected_ids,
-            theme="續談上次議題",
-            difficulty=difficulty,
-            prior_snapshot=st.session_state.continuation_snapshot,
-            prior_plan=st.session_state.counseling_plan,
-            prior_analysis=st.session_state.chat_analysis,
-            call_id=f"plan-cont-{thread_id}",
+    if kind == flow.KIND_ANALYZE:
+        st.session_state.chat_analysis = dict(st.session_state.chat_analysis or {})
+        return
+    if kind == flow.KIND_THOUGHT:
+        notes = list(st.session_state.get("coach_thoughts") or [])
+        notes.append({"role": "coach", "content": f"暫時無法回應這個想法：{exc}"})
+        st.session_state.coach_thoughts = notes
+        st.session_state.pending_thought = ""
+        st.session_state.pending_thought_noted = ""
+        return
+    if kind == flow.KIND_PLAN:
+        flow.clear_jobs(st.session_state)
+        flow.set_phase(st.session_state, flow.SETUP)
+        st.error(f"無法開始模擬：{exc}")
+        return
+    st.error(f"結束晤談時發生問題：{exc}")
+
+
+def tick_gemini_queue() -> bool:
+    """Run at most one queued Gemini job for this Streamlit rerun."""
+    try:
+        result = flow.tick(
+            st.session_state,
+            materialize=_materialize_job,
+            run_jobs=lambda jobs: run_browser_jobs(gemini(), jobs),
         )
-        session["model_name"] = service.model_name
-        if mode == "practice":
-            st.session_state.case_data = case_data_from_plan(st.session_state.counseling_plan) or st.session_state.case_data
-    STORE.start_session(session)
-    persist_thread_state("in_progress")
-    st.session_state.pending_opening = True
-    generate_ai_turn(is_opening=True)
-    st.session_state.pending_opening = False
+    except GeminiRouterPending:
+        return False
+    except Exception as exc:
+        job = flow.peek_next(st.session_state)
+        if job and str(job.get("kind") or "") == flow.KIND_EVAL_SNAPSHOT:
+            st.error(f"結束晤談時發生問題：{exc}")
+            return False
+        if job:
+            _fail_job(job, exc)
+            flow.complete_job(st.session_state, str(job.get("id") or ""))
+        return True
+    if not result:
+        return False
+    job = result["job"]
+    try:
+        _apply_job_result(job, result["texts"])
+    except Exception as exc:
+        if str(job.get("kind") or "") == flow.KIND_EVAL_SNAPSHOT:
+            st.error(f"結束晤談時發生問題：{exc}")
+            return False
+        _fail_job(job, exc)
+    flow.complete_job(st.session_state, str(job.get("id") or ""))
+    return True
+
+
+def _drain_session_intents() -> None:
+    pending_start = st.session_state.get("pending_start_new")
+    if pending_start:
+        try:
+            start_new_session(**pending_start)
+            st.session_state.pending_start_new = None
+        except Exception as exc:
+            st.session_state.pending_start_new = None
+            st.error(f"無法開始模擬：{exc}")
+            return
+    pending_cont = st.session_state.get("pending_continuation")
+    if pending_cont:
+        try:
+            start_continuation(pending_cont["thread"], pending_cont["selected_ids"])
+            st.session_state.pending_continuation = None
+        except Exception as exc:
+            st.session_state.pending_continuation = None
+            st.error(f"無法開始續談：{exc}")
+            return
+    pending_final = st.session_state.get("pending_finalize")
+    if pending_final and st.session_state.get("active_session"):
+        try:
+            prepare_finalize(**pending_final)
+        except Exception as exc:
+            st.error(f"結束晤談時發生問題：{exc}")
+
+
+def _starting_without_session() -> bool:
+    job = flow.peek_next(st.session_state)
+    return bool(job and str(job.get("kind") or "") == flow.KIND_PLAN and not _session_in_progress())
 
 
 def new_practice_panel(settings: dict[str, str]) -> None:
@@ -999,8 +1323,12 @@ def stop_simulation_for_risk(session: dict[str, Any], prompt: str) -> None:
         "action_taken": "simulation_stopped_and_human_help_displayed",
         "content_redacted": redact_for_preview(prompt),
     })
+    flow.clear_jobs(st.session_state)
+    st.session_state.pending_finalize = None
     st.session_state.active_session = finish_session(session, CONFIG.timezone, "safety_stopped")
     STORE.finish_session(st.session_state.active_session)
+    persist_thread_state(flow.thread_status_for_end(keep_process=False, safety_stopped=True), include_turns=True)
+    flow.set_phase(st.session_state, flow.FEEDBACK)
 
 
 def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> None:
@@ -1034,41 +1362,21 @@ def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> N
             notes.append({"role": "student", "content": text})
             st.session_state.coach_thoughts = notes
             st.session_state.pending_thought_noted = text
-    text = str(st.session_state.get("pending_thought") or "").strip()
-    if not text:
-        return
-    if st.session_state.get("pending_ai_turn") or st.session_state.get("pending_analyze"):
-        return
-    notes = list(st.session_state.get("coach_thoughts") or [])
-    examples = analysis.get("example_replies")
-    if not isinstance(examples, list):
-        examples = []
-    try:
-        reply = generate_thought_coach_reply(
-            gemini(),
+        examples = analysis.get("example_replies")
+        if not isinstance(examples, list):
+            examples = []
+        flow.enqueue(st.session_state, build_thought_job(
             mode=session["mode"],
             school_id=session["school_id"],
             selected_ids=session["selected_techniques"],
-            turns=st.session_state.prior_turns_context + st.session_state.turns,
+            turns=_dialogue_turns(),
             student_guide=str(analysis.get("student_guide", "")),
             example_replies=[str(item) for item in examples],
-            prior_notes=notes,
+            prior_notes=list(st.session_state.get("coach_thoughts") or []),
             latest_thought=text,
-            call_id=f"thought-{session.get('session_id')}-{len(notes)}",
-        )
-        notes.append({"role": "coach", "content": reply})
-        st.session_state.coach_thoughts = notes
-        st.session_state.pending_thought = ""
-        st.session_state.pending_thought_noted = ""
-        st.rerun()
-    except GeminiRouterPending:
-        return
-    except Exception as exc:
-        notes.append({"role": "coach", "content": f"暫時無法回應這個想法：{exc}"})
-        st.session_state.coach_thoughts = notes
-        st.session_state.pending_thought = ""
-        st.session_state.pending_thought_noted = ""
-        st.rerun()
+            request_id=f"thought-{session.get('session_id')}-{len(st.session_state.get('coach_thoughts') or [])}",
+            meta={"latest_thought": text},
+        ))
 
 
 def render_chat() -> None:
@@ -1130,11 +1438,14 @@ def render_chat() -> None:
                         extra = ""
                     st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
             with action_col:
-                if st.button("結束晤談", use_container_width=True):
+                ending = _ending_session()
+                if ending:
+                    st.caption("正在整理晤談回饋…")
+                elif st.button("結束晤談", use_container_width=True):
                     if session["mode"] == "experience":
                         request_experience_research_consent()
                     else:
-                        finalize_session()
+                        st.session_state.pending_finalize = {"consent": "yes"}
                         st.rerun()
         for turn in st.session_state.turns:
             role = str(turn["speaker_role"])
@@ -1147,11 +1458,13 @@ def render_chat() -> None:
     prompt = None
     is_client = session["mode"] == "experience"
     chat_placeholder = "以個案身分說說你的感受或想法…" if is_client else "輸入你的諮商回應…"
+    ending = _ending_session()
     if show_plan or show_thoughts:
         chat_col, coach_col = st.columns([1.8, 1] if is_client else [1.55, 1], gap="large")
         with chat_col:
             render_dialog()
-            prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
+            if not ending:
+                prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
         with coach_col:
             if show_plan:
                 examples = analysis.get("example_replies") if not is_client else []
@@ -1162,11 +1475,12 @@ def render_chat() -> None:
                     guide=str(analysis.get("student_guide", "")),
                     examples=examples,
                 )
-            if show_thoughts:
+            if show_thoughts and not ending:
                 render_thought_coach(session, analysis)
     else:
         render_dialog()
-        prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
+        if not ending:
+            prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
     if prompt:
         pii = detect_pii(prompt)
         if pii:
@@ -1184,44 +1498,29 @@ def render_chat() -> None:
             st.session_state.pending_student_stored = prompt
         if detect_immediate_risk(prompt):
             stop_simulation_for_risk(session, prompt)
-            st.session_state.pending_ai_turn = None
             st.session_state.pending_student_stored = None
             st.rerun()
             return
-        st.session_state.pending_ai_turn = prompt
-    pending = str(st.session_state.get("pending_ai_turn") or "")
-    if pending:
-        try:
-            generate_ai_turn(is_opening=False, latest_student_message=pending)
-            st.session_state.pending_ai_turn = None
-            st.session_state.pending_student_stored = None
-            st.rerun()
-        except GeminiRouterPending:
-            return
-        except Exception as exc:
-            store_turn(new_turn(
-                session=session,
-                turn_index=len(st.session_state.turns) + 1,
-                speaker_role="system",
-                content="本輪模型暫時無法回應，請稍後再試或結束本次晤談。",
-                timezone=CONFIG.timezone,
-                error_flag=str(exc)[:300],
-            ))
-            st.session_state.pending_ai_turn = None
-            st.session_state.pending_student_stored = None
-            st.rerun()
-        return
-    if st.session_state.get("pending_analyze"):
-        try:
-            apply_pending_analysis()
-            st.rerun()
-        except GeminiRouterPending:
-            return
-        except Exception:
-            st.session_state.pending_analyze = None
-        return
-    if not st.session_state.get("pending_thought"):
-        keep_gemini_router_alive()
+        session_id = str(session.get("session_id") or "")
+        flow.set_phase(st.session_state, flow.LIVE)
+        flow.enqueue(st.session_state, build_chat_job(
+            mode=session["mode"],
+            school_id=session["school_id"],
+            selected_ids=session["selected_techniques"],
+            turns=_dialogue_turns(),
+            latest_student_message=prompt,
+            case_data=st.session_state.case_data,
+            continuation_snapshot=st.session_state.continuation_snapshot,
+            counseling_plan=st.session_state.counseling_plan,
+            chat_analysis=st.session_state.chat_analysis,
+            is_opening=False,
+            request_id=f"chat-{session_id}-{len(st.session_state.turns or [])}",
+            meta={
+                "is_opening": False,
+                "latest_student_message": prompt,
+                "has_prior_turns": bool(st.session_state.prior_turns_context),
+            },
+        ))
 
 
 def request_experience_research_consent() -> None:
@@ -1248,129 +1547,62 @@ def _open_experience_research_consent() -> None:
             st.rerun()
 
 
-def finalize_session(*, keep_transcript: bool = True, consent: str | None = None) -> None:
-    session = finish_session(st.session_state.active_session, CONFIG.timezone, "completed")
+def prepare_finalize(*, keep_transcript: bool = True, consent: str | None = None) -> None:
+    session = st.session_state.active_session
+    if not session or str(session.get("completion_status") or "") != "in_progress":
+        st.session_state.pending_finalize = None
+        return
     if session["mode"] == "experience":
         chosen = consent if consent in {"yes", "no", "anonymous"} else ("yes" if keep_transcript else "no")
-        session["research_consent"] = chosen
     else:
         chosen = "yes"
-        session["research_consent"] = ""
-    st.session_state.active_session = session
-    STORE.finish_session(session)
-
+    if flow.has_kind(st.session_state, flow.KIND_EVAL_SNAPSHOT):
+        return
     if chosen != "yes":
-        persist_thread_state("active", include_turns=False)
+        finished = finish_session(session, CONFIG.timezone, "completed")
+        finished["research_consent"] = chosen
+        st.session_state.active_session = finished
+        STORE.finish_session(finished)
         st.session_state.assessment = {}
         st.session_state.raw_assessment = ""
         st.session_state.continuation_snapshot = {
-            "continuation_role": session["continuation_role"],
+            "continuation_role": finished["continuation_role"],
             "relationship_summary": "本次未保存可識別的晤談過程，續談時請重新建立關係與焦點。",
             "disclosed_topics": [],
             "unfinished_issues": [],
             "next_session_focus": [],
         }
-        persist_thread_state("active", include_turns=False)
+        persist_thread_state(flow.thread_status_for_end(keep_process=False), include_turns=False)
         if chosen == "anonymous":
             save_anon = getattr(STORE, "save_anonymous_transcript", None)
             if callable(save_anon):
-                save_anon(session, st.session_state.turns)
+                save_anon(finished, st.session_state.turns)
             else:
                 from src.data_store import GoogleSheetsStore
-                GoogleSheetsStore.save_anonymous_transcript(STORE, session, st.session_state.turns)
-        STORE.purge_session_transcript(session["session_id"])
+                GoogleSheetsStore.save_anonymous_transcript(STORE, finished, st.session_state.turns)
+        STORE.purge_session_transcript(finished["session_id"])
         st.session_state.turns = []
         st.session_state.turn_reviews = []
         st.session_state.coach_thoughts = []
         st.session_state.chat_analysis = None
         st.session_state.counseling_plan = None
+        flow.clear_jobs(st.session_state)
+        st.session_state.pending_finalize = None
+        flow.set_phase(st.session_state, flow.FEEDBACK)
         return
-
-    raw = ""
-    parsed: dict[str, Any]
-    eval_id = f"eval-{session['session_id']}"
-    snapshot_id = f"snapshot-{session['session_id']}"
-    if session["mode"] == "practice":
-        eval_prompt = build_practice_evaluator_prompt(
-            session["school_id"], session["selected_techniques"], st.session_state.turns
-        )
-    else:
-        eval_prompt = build_experience_analysis_prompt(
-            session["school_id"], session["selected_techniques"], st.session_state.turns
-        )
-    try:
-        texts = run_browser_jobs(gemini(), [
-            {
-                "request_id": eval_id,
-                "prompt": eval_prompt,
-                "system_instruction": "你是形成性教學回饋評量器。只能根據逐字稿證據輸出 JSON。",
-                "temperature": 0.1,
-                "max_output_tokens": 3200,
-                "response_json": True,
-            },
-            {
-                "request_id": snapshot_id,
-                "prompt": build_snapshot_prompt(
-                    session["mode"], session["school_id"], session["selected_techniques"],
-                    st.session_state.turns, st.session_state.continuation_snapshot,
-                ),
-                "system_instruction": "你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
-                "temperature": 0.1,
-                "max_output_tokens": 1600,
-                "response_json": True,
-            },
-        ])
-    except GeminiRouterPending:
-        raise
-    raw = texts.get(eval_id, "")
-    try:
-        parsed = parse_json_response(raw)
-    except Exception as exc:
-        parsed = {
-            "total_score": None,
-            "strengths": [],
-            "improvement_points": [],
-            "encouragement": "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。",
-            "limitations": str(exc),
-        }
-    try:
-        snapshot = parse_json_response(texts.get(snapshot_id, ""))
-    except Exception:
-        snapshot = {
-            "continuation_role": session["continuation_role"],
-            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
-            "disclosed_topics": [],
-            "unfinished_issues": [],
-            "next_session_focus": [],
-        }
-
-    assessment_id = str(st.session_state.setdefault(f"_assessment_id_{session['session_id']}", str(uuid.uuid4())))
-    record = {
-        "assessment_id": assessment_id,
-        "session_id": session["session_id"],
-        "participant_id": session["participant_id"],
-        "mode": session["mode"],
-        "school_id": session["school_id"],
-        "rubric_version": CONFIG.rubric_version,
-        "total_score": parsed.get("total_score", parsed.get("score", "")),
-        "dimension_scores": parsed.get("dimensions", {}),
-        "skill_events": parsed.get("skill_events", parsed.get("technique_explanations", [])),
-        "strengths": parsed.get("strengths", []),
-        "improvement_points": parsed.get("improvement_points", []),
-        "quoted_examples": parsed.get("alternative_responses", []),
-        "next_practice_focus": parsed.get("next_practice_focus", parsed.get("reflection_questions", [])),
-        "encouragement": parsed.get("encouragement", ""),
-        "raw_model_output": raw,
-        "parsed_json": parsed,
-        "created_at": STORE.now(),
-    }
-    if st.session_state.get("_assessment_saved_for") != session["session_id"]:
-        STORE.save_assessment(record)
-        st.session_state._assessment_saved_for = session["session_id"]
-    st.session_state.assessment = parsed
-    st.session_state.raw_assessment = raw
-    st.session_state.continuation_snapshot = snapshot
-    persist_thread_state("active", include_turns=True)
+    session["research_consent"] = chosen if session["mode"] == "experience" else ""
+    st.session_state.active_session = session
+    flow.clear_jobs(st.session_state)
+    flow.set_phase(st.session_state, flow.ENDING)
+    flow.enqueue(st.session_state, build_eval_snapshot_job(
+        mode=session["mode"],
+        school_id=session["school_id"],
+        selected_ids=session["selected_techniques"],
+        turns=list(st.session_state.turns or []),
+        continuation_snapshot=st.session_state.continuation_snapshot,
+        session_id=str(session["session_id"]),
+        meta={"consent": chosen},
+    ))
 
 
 def render_feedback(settings: dict[str, str]) -> None:
@@ -1471,6 +1703,8 @@ def render_feedback(settings: dict[str, str]) -> None:
             st.caption("未保存逐字稿，因此沒有檔案可下載。")
     with home_col:
         if st.button("回到練習首頁", type="primary", use_container_width=True):
+            flow.clear_jobs(st.session_state)
+            flow.set_phase(st.session_state, flow.SETUP)
             st.session_state.active_session = None
             st.session_state.turns = []
             st.session_state.case_data = None
@@ -1516,42 +1750,14 @@ def student_page() -> None:
         return
     if pending_save:
         render_saved_api_keys(save_key=pending_save, hide=True)
-    pending_start = st.session_state.get("pending_start_new")
-    if pending_start:
-        try:
-            start_new_session(**pending_start)
-            st.session_state.pending_start_new = None
+    _drain_session_intents()
+    if _session_in_progress() != in_chat:
+        st.rerun()
+    if _starting_without_session():
+        st.info("正在準備模擬…")
+        if tick_gemini_queue():
             st.rerun()
-        except GeminiRouterPending:
-            pass
-        except Exception as exc:
-            st.session_state.pending_start_new = None
-            st.error(f"無法開始模擬：{exc}")
-            return
-    pending_cont = st.session_state.get("pending_continuation")
-    if pending_cont:
-        try:
-            start_continuation(pending_cont["thread"], pending_cont["selected_ids"])
-            st.session_state.pending_continuation = None
-            st.rerun()
-        except GeminiRouterPending:
-            pass
-        except Exception as exc:
-            st.session_state.pending_continuation = None
-            st.error(f"無法開始續談：{exc}")
-            return
-    pending_final = st.session_state.get("pending_finalize")
-    if pending_final and st.session_state.get("active_session"):
-        try:
-            finalize_session(**pending_final)
-            st.session_state.pending_finalize = None
-            st.rerun()
-        except GeminiRouterPending:
-            pass
-        except Exception as exc:
-            st.session_state.pending_finalize = None
-            st.error(f"結束晤談時發生問題：{exc}")
-            return
+        return
     in_chat = bool(
         st.session_state.active_session
         and st.session_state.active_session.get("completion_status") == "in_progress"
@@ -1561,6 +1767,11 @@ def student_page() -> None:
             render_chat()
         else:
             render_feedback(settings)
+            return
+        if tick_gemini_queue():
+            st.rerun()
+        elif not flow.has_jobs(st.session_state):
+            keep_gemini_router_alive()
         return
     tab1, tab2 = st.tabs(["開始新模擬", "續談上次歷程"])
     with tab1:
