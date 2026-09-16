@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 0; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <script>
+      function post(type, extra) {
+        window.parent.postMessage(Object.assign({
+          isStreamlitMessage: true,
+          type: type
+        }, extra || {}), "*");
+      }
+
+      function installGuard(doc) {
+        if (!doc || !doc.documentElement) return;
+        if (doc.documentElement.dataset.ctImeEnterGuard === "1") return;
+        doc.documentElement.dataset.ctImeEnterGuard = "1";
+
+        var composing = false;
+        var justEnded = false;
+        var clearTimer = 0;
+
+        function isEnter(event) {
+          return event.key === "Enter" || event.keyCode === 13 || event.which === 13;
+        }
+
+        function isImeConfirm(event) {
+          return Boolean(
+            composing ||
+            event.isComposing ||
+            event.keyCode === 229 ||
+            event.which === 229 ||
+            event.key === "Process" ||
+            justEnded
+          );
+        }
+
+        function markCompositionEnd() {
+          composing = false;
+          justEnded = true;
+          if (clearTimer) window.parent.clearTimeout(clearTimer);
+          window.parent.requestAnimationFrame(function () {
+            window.parent.requestAnimationFrame(function () {
+              clearTimer = window.parent.setTimeout(function () {
+                justEnded = false;
+              }, 50);
+            });
+          });
+        }
+
+        doc.addEventListener("compositionstart", function () {
+          composing = true;
+          justEnded = false;
+        }, true);
+        doc.addEventListener("compositionupdate", function () {
+          composing = true;
+        }, true);
+        doc.addEventListener("compositionend", markCompositionEnd, true);
+        doc.addEventListener("keydown", function (event) {
+          if (!isEnter(event) || !isImeConfirm(event)) return;
+          event.stopImmediatePropagation();
+          event.stopPropagation();
+          if (justEnded && !event.isComposing && event.keyCode !== 229) {
+            event.preventDefault();
+          }
+        }, true);
+      }
+
+      try {
+        installGuard(window.parent.document);
+      } catch (error) {
+        installGuard(document);
+      }
+
+      post("streamlit:componentReady", { apiVersion: 1 });
+      post("streamlit:setFrameHeight", { height: 1 });
+    </script>
+  </body>
+</html>

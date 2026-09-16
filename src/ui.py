@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from html import escape
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+import streamlit.components.v1 as components
 
 APP_CSS = """
 @import url("https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&display=swap");
@@ -104,6 +107,23 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   margin: 0 !important;
   padding: 0 !important;
   overflow: visible !important;
+}
+
+iframe[title$="ime_enter_guard"] {
+  height: 0 !important;
+  width: 0 !important;
+  border: 0 !important;
+  position: absolute !important;
+  pointer-events: none !important;
+}
+
+[data-testid="stElementContainer"]:has(iframe[title$="ime_enter_guard"]),
+[data-testid="element-container"]:has(iframe[title$="ime_enter_guard"]) {
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
 }
 
 [data-testid="stVerticalBlockBorderWrapper"] {
@@ -712,8 +732,18 @@ def _st():
     return st
 
 
+_IME_GUARD_DIR = Path(__file__).resolve().parent / "frontend" / "ime_enter_guard"
+_ime_enter_guard = components.declare_component("ime_enter_guard", path=str(_IME_GUARD_DIR))
+
+
+def install_ime_enter_guard() -> None:
+    """Keep Zhuyin/IME Enter from submitting st.chat_input while composing."""
+    _ime_enter_guard(default=None, key="ct_ime_enter_guard")
+
+
 def apply_theme(density: str = "student") -> None:
     st = _st()
+    install_ime_enter_guard()
     widths = {
         "login": "28.5rem",
         "student": "46rem",

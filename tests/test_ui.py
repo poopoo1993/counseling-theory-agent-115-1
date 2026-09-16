@@ -32,6 +32,21 @@ def test_thought_log_styles_exist() -> None:
     assert ":has(.ct-online)" in APP_CSS
 
 
+def test_ime_enter_guard_blocks_composition_enter() -> None:
+    from pathlib import Path
+
+    from src.ui import APP_CSS, _IME_GUARD_DIR, install_ime_enter_guard
+
+    html = (_IME_GUARD_DIR / "index.html").read_text(encoding="utf-8")
+    assert "compositionend" in html
+    assert "isComposing" in html
+    assert "229" in html
+    assert "justEnded" in html
+    assert "st.chat_input" not in html
+    assert 'iframe[title$="ime_enter_guard"]' in APP_CSS
+    assert callable(install_ime_enter_guard)
+
+
 def test_experience_coaching_panel_is_observer_notes() -> None:
     copy = coaching_panel_copy("experience")
     assert copy["title"] == "此刻示範說明"
