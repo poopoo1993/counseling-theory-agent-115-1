@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 0; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <script>
+      const STORAGE_KEY = "counseling_theory_gemini_quota";
+      const SENT_KEY = "counseling_theory_gemini_quota_sent";
+      const TTL_SECONDS = 48 * 3600;
+      var lastSent = "";
+      try { lastSent = window.sessionStorage.getItem(SENT_KEY) || ""; } catch (error) { lastSent = ""; }
+
+      function post(type, extra) {
+        window.parent.postMessage(Object.assign({
+          isStreamlitMessage: true,
+          type: type
+        }, extra || {}), "*");
+      }
+
+      function setValue(value) {
+        post("streamlit:setComponentValue", { value: value });
+      }
+
+      function setHeight(height) {
+        post("streamlit:setFrameHeight", { height: height });
+      }
+
+      function canStore() {
+        try {
+          window.localStorage.setItem("__ct_quota_probe", "1");
+          window.localStorage.removeItem("__ct_quota_probe");
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function asEvent(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        var id = String(raw.id || "").trim();
+        var ts = Number(raw.ts || 0);
+        var tokens = Number(raw.prompt_tokens || 0);
+        if (!id || !(ts > 0) || tokens < 0 || !isFinite(ts) || !isFinite(tokens)) return null;
+        return { id: id, ts: ts, prompt_tokens: Math.max(0, Math.floor(tokens)) };
+      }
+
+      function loadEvents() {
+        if (!canStore()) return [];
+        try {
+          var parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]");
+          if (!Array.isArray(parsed)) return [];
+          return parsed.map(asEvent).filter(Boolean);
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function saveEvents(events) {
+        if (!canStore()) return;
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
+      }
+
+      function mergeEvents(groups, now) {
+        var cutoff = now - TTL_SECONDS;
+        var byId = {};
+        groups.forEach(function (group) {
+          (group || []).forEach(function (raw) {
+            var event = asEvent(raw);
+            if (!event || event.ts < cutoff) return;
+            byId[event.id] = event;
+          });
+        });
+        return Object.keys(byId).map(function (key) { return byId[key]; })
+          .sort(function (a, b) {
+            if (a.ts === b.ts) return a.id < b.id ? -1 : 1;
+            return a.ts - b.ts;
+          });
+      }
+
+      function fingerprint(events) {
+        return events.map(function (event) {
+          return event.id + ":" + event.ts + ":" + event.prompt_tokens;
+        }).join("|");
+      }
+
+      window.addEventListener("message", function (event) {
+        if (!event.data || event.data.type !== "streamlit:render") return;
+        var args = event.data.args || {};
+        var now = Date.now() / 1000;
+        var merged = mergeEvents([loadEvents(), args.events || []], now);
+        saveEvents(merged);
+        var next = fingerprint(merged);
+        if (next !== lastSent) {
+          lastSent = next;
+          try { window.sessionStorage.setItem(SENT_KEY, next); } catch (error) {}
+          setValue({ events: merged });
+        }
+        setHeight(1);
+      });
+
+      post("streamlit:componentReady", { apiVersion: 1 });
+      setHeight(1);
+    </script>
+  </body>
+</html>

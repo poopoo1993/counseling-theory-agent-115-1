@@ -51,6 +51,33 @@
         return String(text || "").trim();
       }
 
+      const QUOTA_KEY = "counseling_theory_gemini_quota";
+      const QUOTA_TTL = 48 * 3600;
+
+      function promptTokens(payload, args) {
+        var usage = (payload || {}).usageMetadata || {};
+        var counted = Number(usage.promptTokenCount || 0);
+        if (counted > 0 && isFinite(counted)) return Math.floor(counted);
+        return Math.max(1, String(args.prompt || "").length + String(args.system_instruction || "").length);
+      }
+
+      function recordQuota(args, payload, eventId) {
+        try {
+          var now = Date.now() / 1000;
+          var parsed = JSON.parse(window.localStorage.getItem(QUOTA_KEY) || "[]");
+          if (!Array.isArray(parsed)) parsed = [];
+          parsed.push({
+            id: String(eventId || args.request_id || now),
+            ts: now,
+            prompt_tokens: promptTokens(payload, args)
+          });
+          parsed = parsed.filter(function (item) {
+            return item && Number(item.ts) >= now - QUOTA_TTL;
+          });
+          window.localStorage.setItem(QUOTA_KEY, JSON.stringify(parsed));
+        } catch (error) {}
+      }
+
       function isRetryable(status, body) {
         var text = String(body || "").toLowerCase();
         return (
@@ -126,6 +153,7 @@
             return generateOnce(model, args).then(function (result) {
               if (result.status >= 200 && result.status < 300) {
                 var text = extractText(result.payload);
+                recordQuota(args, result.payload, text ? args.request_id : args.request_id + ":empty:" + attempt);
                 if (!text) {
                   lastError = "空白內容";
                   if (attempt < tries - 1) {
@@ -139,6 +167,7 @@
                   text: text,
                   model: model,
                   latency_ms: result.latency,
+                  prompt_tokens: promptTokens(result.payload, args),
                   error: ""
                 };
                 return;

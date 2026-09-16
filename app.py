@@ -39,7 +39,9 @@ from src.data_store import (
     require_sheets_enabled,
 )
 from src.browser_keys import render_saved_api_keys
+from src.quota_meter import sync_quota_events
 from src.gemini_client import GeminiService, parse_json_response
+from src.gemini_quota import EVENTS_KEY, merge_events, snapshot as quota_snapshot
 from src.gemini_router import GeminiRouterPending, keep_gemini_router_alive, run_browser_jobs
 from src.llm_pipeline import (
     build_analyze_job,
@@ -356,7 +358,21 @@ def show_online_people() -> None:
         people = STORE.list_online_users()
     except Exception:
         people = []
-    render_online_badge(people, show_people=bool(st.session_state.get("authenticated")))
+    local_events = st.session_state.get(EVENTS_KEY) or []
+    synced = sync_quota_events(local_events)
+    st.session_state[EVENTS_KEY] = merge_events(local_events, synced, now=time.time())
+    quota = quota_snapshot(
+        st.session_state[EVENTS_KEY],
+        now=time.time(),
+        rpm_limit=CONFIG.gemini_free_rpm,
+        rpd_limit=CONFIG.gemini_free_rpd,
+        tpm_limit=CONFIG.gemini_free_tpm,
+    )
+    render_online_badge(
+        people,
+        show_people=bool(st.session_state.get("authenticated")),
+        quota=quota,
+    )
 
 
 if hasattr(st, "fragment"):

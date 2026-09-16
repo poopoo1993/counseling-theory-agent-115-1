@@ -29,6 +29,9 @@ def test_gemini_router_html_posts_generate_content_and_retries():
     assert "Promise.all" in html
     assert "queuedJobs" in html
     assert "generativelanguage.googleapis.com" in html
+    assert "promptTokenCount" in html
+    assert "counseling_theory_gemini_quota" in html
+    assert "recordQuota" in html
     assert "resultValue = {" in html
     assert "error: errText" in html
 
@@ -50,6 +53,7 @@ def test_generate_via_browser_returns_cached_call_id(monkeypatch):
                 "text": "pong",
                 "model": "gemini-flash-latest",
                 "latency_ms": 12,
+                "prompt_tokens": 2,
                 "error": "",
             }]
         }
@@ -62,6 +66,10 @@ def test_generate_via_browser_returns_cached_call_id(monkeypatch):
     assert first == second == "pong"
     assert calls["n"] == 1
     assert service.last_latency_ms == 12
+    events = state["_gemini_quota_events"]
+    assert len(events) == 1
+    assert events[0]["id"] == "validate"
+    assert events[0]["prompt_tokens"] == 2
 
 
 def test_run_browser_jobs_renders_iframe_only_once_per_run(monkeypatch):

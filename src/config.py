@@ -11,6 +11,7 @@ from .gemini_client import (
     canonical_model_name,
     sanitize_fallback_models,
 )
+from .gemini_quota import DEFAULT_FREE_RPD, DEFAULT_FREE_RPM, DEFAULT_FREE_TPM
 
 
 def _section(source: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -57,6 +58,9 @@ class AppConfig:
     otp_ttl_seconds: int
     max_input_chars: int
     recent_context_turns: int
+    gemini_free_rpm: int
+    gemini_free_rpd: int
+    gemini_free_tpm: int
 
     @classmethod
     def from_secrets(cls, secrets: Mapping[str, Any]) -> "AppConfig":
@@ -91,6 +95,9 @@ class AppConfig:
             otp_ttl_seconds=int(auth.get("otp_ttl_seconds", 600)),
             max_input_chars=int(app.get("max_input_chars", 800)),
             recent_context_turns=int(app.get("recent_context_turns", 14)),
+            gemini_free_rpm=int(app.get("gemini_free_rpm", DEFAULT_FREE_RPM)),
+            gemini_free_rpd=int(app.get("gemini_free_rpd", DEFAULT_FREE_RPD)),
+            gemini_free_tpm=int(app.get("gemini_free_tpm", DEFAULT_FREE_TPM)),
         )
 
 

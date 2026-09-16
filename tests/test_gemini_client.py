@@ -192,9 +192,14 @@ def test_generate_text_reports_friendly_error_when_same_model_unavailable():
 
 
 def test_config_defaults_to_single_latest_flash_model():
+    from src.gemini_quota import DEFAULT_FREE_RPD, DEFAULT_FREE_RPM, DEFAULT_FREE_TPM
+
     cfg = AppConfig.from_secrets({})
     assert cfg.model_name == DEFAULT_MODEL_NAME
     assert cfg.fallback_models == DEFAULT_FALLBACK_MODELS
+    assert cfg.gemini_free_rpm == DEFAULT_FREE_RPM
+    assert cfg.gemini_free_rpd == DEFAULT_FREE_RPD
+    assert cfg.gemini_free_tpm == DEFAULT_FREE_TPM
     cfg = AppConfig.from_secrets({
         "app": {
             "model_name": "gemini-2.0-flash",

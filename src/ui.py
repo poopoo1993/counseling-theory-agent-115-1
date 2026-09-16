@@ -8,6 +8,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import streamlit.components.v1 as components
 
+from .gemini_quota import format_remaining
+
 APP_CSS = """
 @import url("https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&display=swap");
 
@@ -100,8 +102,12 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   overflow: hidden !important;
 }
 
+[data-testid="stElementContainer"]:has(.ct-hud),
+[data-testid="element-container"]:has(.ct-hud),
 [data-testid="stElementContainer"]:has(.ct-online),
-[data-testid="element-container"]:has(.ct-online) {
+[data-testid="element-container"]:has(.ct-online),
+[data-testid="stElementContainer"]:has(iframe[title$="quota_sync"]),
+[data-testid="element-container"]:has(iframe[title$="quota_sync"]) {
   height: 0 !important;
   min-height: 0 !important;
   margin: 0 !important;
@@ -110,7 +116,8 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
 }
 
 iframe[title$="ime_enter_guard"],
-iframe[title$="gemini_router"] {
+iframe[title$="gemini_router"],
+iframe[title$="quota_sync"] {
   height: 0 !important;
   width: 0 !important;
   border: 0 !important;
@@ -511,12 +518,79 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   margin-bottom: 0.3rem;
 }
 
-.ct-online {
+.ct-hud {
   position: fixed;
   top: 0.85rem;
   right: 1.15rem;
   z-index: 10050;
+  display: flex;
+  align-items: stretch;
+  gap: 0.45rem;
   font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
+.ct-quota {
+  background: var(--ct-surface);
+  border: 1px solid var(--ct-line);
+  border-radius: 16px;
+  box-shadow: var(--ct-shadow);
+  padding: 0.32rem 0.72rem 0.38rem;
+  min-width: 15.5rem;
+}
+
+.ct-quota-track {
+  position: relative;
+  height: 0.46rem;
+  border-radius: 999px;
+  background: #efebe3;
+  overflow: hidden;
+}
+
+.ct-quota-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+}
+
+.ct-quota-rpd {
+  background: rgba(61, 107, 99, 0.62);
+}
+
+.ct-quota-tpm {
+  background: rgba(196, 132, 48, 0.62);
+}
+
+.ct-quota-rpm {
+  background: rgba(138, 59, 50, 0.62);
+}
+
+.ct-quota-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.35rem;
+  margin-top: 0.22rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--ct-muted);
+  white-space: nowrap;
+}
+
+.ct-quota-legend span[data-kind="rpd"] { color: #3d6b63; }
+.ct-quota-legend span[data-kind="tpm"] { color: #8a5a18; }
+.ct-quota-legend span[data-kind="rpm"] { color: #8a3b32; }
+
+.ct-quota-capped {
+  border-color: #d7b4ae;
+}
+
+.ct-quota-capped .ct-quota-track {
+  box-shadow: inset 0 0 0 1px rgba(138, 59, 50, 0.45);
+}
+
+.ct-online {
+  position: relative;
 }
 
 .ct-online details {
@@ -705,12 +779,27 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 }
 
 @media (max-width: 800px) {
+  .block-container,
+  [data-testid="stMainBlockContainer"] {
+    padding-top: 5.4rem;
+  }
   .ct-role-grid,
   .ct-meta-grid {
     grid-template-columns: 1fr;
   }
   .ct-masthead-copy h1 {
     font-size: 1.22rem;
+  }
+  .ct-hud {
+    top: 0.55rem;
+    right: 0.55rem;
+    left: 0.55rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .ct-quota {
+    min-width: 0;
+    flex: 1 1 12rem;
   }
 }
 """
@@ -818,7 +907,44 @@ def render_safety_notice() -> None:
     )
 
 
-def render_online_badge(people: Sequence[Mapping[str, Any]], *, show_people: bool) -> None:
+def _quota_bar_html(quota: Mapping[str, Any] | None) -> str:
+    if not quota:
+        return ""
+    rpm_pct = round(float(quota.get("rpm_ratio") or 0) * 100, 1)
+    rpd_pct = round(float(quota.get("rpd_ratio") or 0) * 100, 1)
+    tpm_pct = round(float(quota.get("tpm_ratio") or 0) * 100, 1)
+    rpm_left = format_remaining(int(quota.get("rpm_remaining") or 0))
+    rpd_left = format_remaining(int(quota.get("rpd_remaining") or 0))
+    tpm_left = format_remaining(int(quota.get("tpm_remaining") or 0))
+    capped = " ct-quota-capped" if quota.get("limited") else ""
+    title = (
+        "Google Flash 免費額度剩餘量；RPM／RPD／TPM 重疊顯示，任一項到頂即會被限制。"
+        f" 上限：{int(quota.get('rpm_limit') or 0)} RPM、"
+        f"{int(quota.get('rpd_limit') or 0)} RPD、"
+        f"{format_remaining(int(quota.get('tpm_limit') or 0))} TPM。"
+    )
+    return f"""
+        <div class="ct-quota{capped}" title="{escape_html(title)}">
+          <div class="ct-quota-track" role="meter" aria-label="{escape_html(title)}">
+            <span class="ct-quota-fill ct-quota-rpd" style="width:{rpd_pct}%"></span>
+            <span class="ct-quota-fill ct-quota-tpm" style="width:{tpm_pct}%"></span>
+            <span class="ct-quota-fill ct-quota-rpm" style="width:{rpm_pct}%"></span>
+          </div>
+          <div class="ct-quota-legend">
+            <span data-kind="rpm">RPM 剩 {escape_html(rpm_left)}</span>
+            <span data-kind="rpd">RPD 剩 {escape_html(rpd_left)}</span>
+            <span data-kind="tpm">TPM 剩 {escape_html(tpm_left)}</span>
+          </div>
+        </div>
+        """
+
+
+def render_online_badge(
+    people: Sequence[Mapping[str, Any]],
+    *,
+    show_people: bool,
+    quota: Mapping[str, Any] | None = None,
+) -> None:
     st = _st()
     count = len(people)
     label = f"{count} 人在線"
@@ -834,11 +960,14 @@ def render_online_badge(people: Sequence[Mapping[str, Any]], *, show_people: boo
         items = f"<ul>{''.join(rows)}</ul>"
     st.markdown(
         f"""
-        <div class="ct-online" data-openable="{1 if can_open else 0}">
-          <details>
-            <summary><span class="ct-online-dot" aria-hidden="true"></span>{escape_html(label)}</summary>
-            {items}
-          </details>
+        <div class="ct-hud">
+          {_quota_bar_html(quota)}
+          <div class="ct-online" data-openable="{1 if can_open else 0}">
+            <details>
+              <summary><span class="ct-online-dot" aria-hidden="true"></span>{escape_html(label)}</summary>
+              {items}
+            </details>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,

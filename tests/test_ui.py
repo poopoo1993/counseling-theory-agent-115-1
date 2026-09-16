@@ -29,7 +29,37 @@ def test_thought_log_styles_exist() -> None:
     assert "[data-testid=\"InputInstructions\"]" in APP_CSS
     assert "span:not(:last-child)" in APP_CSS
     assert "padding-top: 3.15rem" in APP_CSS
+    assert ":has(.ct-hud)" in APP_CSS
     assert ":has(.ct-online)" in APP_CSS
+    assert ".ct-quota-fill" in APP_CSS
+    assert 'iframe[title$="quota_sync"]' in APP_CSS
+
+
+def test_quota_bar_overlays_three_remaining_metrics():
+    from src.ui import _quota_bar_html
+
+    html = _quota_bar_html({
+        "rpm_ratio": 0.4,
+        "rpd_ratio": 0.8,
+        "tpm_ratio": 0.2,
+        "rpm_remaining": 6,
+        "rpd_remaining": 50,
+        "tpm_remaining": 200000,
+        "rpm_limit": 10,
+        "rpd_limit": 250,
+        "tpm_limit": 250000,
+        "limited": False,
+    })
+    assert "ct-quota-fill ct-quota-rpd" in html
+    assert "ct-quota-fill ct-quota-tpm" in html
+    assert "ct-quota-fill ct-quota-rpm" in html
+    assert "width:80.0%" in html
+    assert "width:40.0%" in html
+    assert "width:20.0%" in html
+    assert "RPM 剩 6" in html
+    assert "RPD 剩 50" in html
+    assert "TPM 剩 200K" in html
+    assert "ct-quota-capped" not in html
 
 
 def test_ime_enter_guard_blocks_composition_enter() -> None:
@@ -45,6 +75,7 @@ def test_ime_enter_guard_blocks_composition_enter() -> None:
     assert "st.chat_input" not in html
     assert 'iframe[title$="ime_enter_guard"]' in APP_CSS
     assert 'iframe[title$="gemini_router"]' in APP_CSS
+    assert 'iframe[title$="quota_sync"]' in APP_CSS
     assert callable(install_ime_enter_guard)
 
 

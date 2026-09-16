@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import streamlit.components.v1 as components
 
 from .gemini_client import GeminiService, format_gemini_error
+from .gemini_quota import EVENTS_KEY, estimate_prompt_tokens, record_event
 
 _COMPONENT_DIR = Path(__file__).resolve().parent / "frontend" / "gemini_router"
 _gemini_router = components.declare_component("gemini_router", path=str(_COMPONENT_DIR))
@@ -33,6 +35,27 @@ def _results() -> dict[str, Any]:
         store = {}
         session_state[_RESULTS_KEY] = store
     return store
+
+
+def _record_quota(payload: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    if str(payload.get("error") or "").strip():
+        return
+    request_id = str(payload.get("request_id") or job.get("request_id") or "").strip()
+    if not request_id:
+        return
+    try:
+        tokens = int(payload.get("prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        tokens = 0
+    if tokens <= 0:
+        tokens = estimate_prompt_tokens(str(job.get("prompt") or ""), str(job.get("system_instruction") or ""))
+    session_state = _st().session_state
+    session_state[EVENTS_KEY] = record_event(
+        session_state.get(EVENTS_KEY),
+        event_id=request_id,
+        prompt_tokens=tokens,
+        ts=time.time(),
+    )
 
 
 def _unwrap(raw: Any, service: GeminiService) -> str:
@@ -120,6 +143,8 @@ def run_browser_jobs(service: GeminiService, jobs: Sequence[Mapping[str, Any]]) 
             raise GeminiRouterPending()
         for request_id, payload in received.items():
             cache[request_id] = payload
+            job = next((item for item in pending if item["request_id"] == request_id), {"request_id": request_id})
+            _record_quota(payload, job)
         st.session_state[_RESULTS_KEY] = cache
     return {job["request_id"]: _unwrap(cache[job["request_id"]], service) for job in prepared}
 
