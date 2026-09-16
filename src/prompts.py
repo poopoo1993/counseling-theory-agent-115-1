@@ -139,14 +139,14 @@ def live_plan_visible(difficulty: str) -> bool:
     return coaching_tier(difficulty) == "easy"
 
 
-def thought_coach_visible(mode: str, difficulty: str) -> bool:
-    """實作初階才顯示旁欄想法框；體驗（學生當個案）不顯示。"""
-    return mode == "practice" and live_plan_visible(difficulty)
-
-
 def turn_review_visible(difficulty: str) -> bool:
     """初階與中階在對話中顯示單句回饋／目標效果。"""
     return coaching_tier(difficulty) in {"easy", "medium"}
+
+
+def thought_coach_visible(mode: str, difficulty: str) -> bool:
+    """實作初階／中階顯示旁欄想法框；體驗與進階不顯示。"""
+    return mode == "practice" and turn_review_visible(difficulty)
 
 
 def live_coaching_enabled(mode: str, difficulty: str) -> bool:
@@ -449,7 +449,7 @@ def build_thought_coach_prompt(
     examples = "\n".join(f"- {item}" for item in example_replies if str(item).strip()) or "（尚無例句）"
     if mode == "practice":
         system = COMMON_SYSTEM + """
-你是初階實作的教學督導，只回應學生對此刻晤談的想法與判斷。可以點名本次指定技巧、肯定合宜判斷、溫和校正偏離。
+你是實作的教學督導，只回應學生對此刻晤談的想法與判斷。可以點名本次指定技巧、肯定合宜判斷、溫和校正偏離。
 不得扮演模擬個案，不得把這段話當成晤談對話，不得要求真實個資，不要打分數。每次回覆 2 至 5 句。"""
         role_note = "模式：practice（學生當諮商師）。針對其臨床想法作答。"
     else:

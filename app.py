@@ -848,7 +848,7 @@ def new_practice_panel(settings: dict[str, str]) -> None:
             if difficulty == "初階":
                 st.caption("初階會在旁邊顯示依此刻談話調整的計畫與例句；你的每一句諮商回應會在對話中給簡短回饋。")
             elif difficulty == "中階":
-                st.caption("中階會在對話中給單句回饋，不顯示諮商計畫。")
+                st.caption("中階會在對話中給單句回饋，並可在旁邊寫下想法；不顯示諮商計畫。")
             else:
                 st.caption("進階不會在對話中提示；整體回饋在結束晤談後一次給出。")
         else:
@@ -1031,6 +1031,7 @@ def render_chat() -> None:
     elapsed = datetime.now(ZoneInfo(CONFIG.timezone)) - datetime.fromisoformat(session["started_at"])
     elapsed_min = max(0, int(elapsed.total_seconds() // 60))
     show_plan = live_plan_visible(str(session.get("difficulty", "")))
+    show_thoughts = thought_coach_visible(str(session.get("mode", "")), str(session.get("difficulty", "")))
     show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
     analysis = st.session_state.chat_analysis or {}
     reviews = {int(item.get("turn_index") or 0): item for item in (st.session_state.get("turn_reviews") or [])}
@@ -1071,7 +1072,14 @@ def render_chat() -> None:
                         extra = " · 單句示範說明開啟"
                     st.caption(f"你正以個案身分對話，約 {elapsed_min} 分鐘 · 建議 {target_minutes} 分鐘{extra}。不評分個案表現；由你自行決定何時結束。")
                 else:
-                    extra = " · 初階即時計畫開啟" if show_plan else (" · 單句說明開啟" if show_turn_review else "")
+                    if show_plan:
+                        extra = " · 初階即時計畫開啟"
+                    elif show_thoughts:
+                        extra = " · 單句說明與想法框開啟"
+                    elif show_turn_review:
+                        extra = " · 單句說明開啟"
+                    else:
+                        extra = ""
                     st.caption(f"目前約 {elapsed_min} 分鐘 · 建議練習 {target_minutes} 分鐘{extra}。由你自行決定何時結束，不強制跳轉。")
             with action_col:
                 if st.button("結束晤談", use_container_width=True):
@@ -1091,21 +1099,22 @@ def render_chat() -> None:
     prompt = None
     is_client = session["mode"] == "experience"
     chat_placeholder = "以個案身分說說你的感受或想法…" if is_client else "輸入你的諮商回應…"
-    if show_plan:
+    if show_plan or show_thoughts:
         chat_col, coach_col = st.columns([1.8, 1] if is_client else [1.55, 1], gap="large")
         with chat_col:
             render_dialog()
             prompt = st.chat_input(chat_placeholder, max_chars=CONFIG.max_input_chars)
         with coach_col:
-            examples = analysis.get("example_replies") if not is_client else []
-            if not isinstance(examples, list):
-                examples = []
-            render_coaching_panel(
-                mode=session["mode"],
-                guide=str(analysis.get("student_guide", "")),
-                examples=examples,
-            )
-            if thought_coach_visible(str(session.get("mode", "")), str(session.get("difficulty", ""))):
+            if show_plan:
+                examples = analysis.get("example_replies") if not is_client else []
+                if not isinstance(examples, list):
+                    examples = []
+                render_coaching_panel(
+                    mode=session["mode"],
+                    guide=str(analysis.get("student_guide", "")),
+                    examples=examples,
+                )
+            if show_thoughts:
                 render_thought_coach(session, analysis)
     else:
         render_dialog()
@@ -1431,6 +1440,7 @@ def student_page() -> None:
         apply_theme(
             "coach"
             if live_plan_visible(str(session.get("difficulty", "")))
+            or thought_coach_visible(str(session.get("mode", "")), str(session.get("difficulty", "")))
             else "chat"
         )
         show_online_people()
