@@ -116,17 +116,24 @@ def initialize_state() -> None:
 initialize_state()
 
 
+STORE_SCHEMA_VERSION = "anonymous-tables-1"
+
+
 @st.cache_resource(show_spinner=False)
-def build_shared_store(sqlite_path: str, timezone: str):
+def build_shared_store(sqlite_path: str, timezone: str, schema_version: str):
     return SqliteStore(sqlite_path, timezone)
 
 
 def get_store():
-    if "data_store" in st.session_state:
-        return st.session_state.data_store
     app = SECRETS.get("app", {}) if isinstance(SECRETS.get("app"), dict) else {}
     sqlite_path = str(app.get("sqlite_path", "data/app.sqlite")).strip() or "data/app.sqlite"
-    store = build_shared_store(sqlite_path, CONFIG.timezone)
+    store = st.session_state.get("data_store")
+    if store is None or not hasattr(store, "save_anonymous_transcript"):
+        store = build_shared_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
+        if not hasattr(store, "save_anonymous_transcript"):
+            build_shared_store.clear()
+            store = build_shared_store(sqlite_path, CONFIG.timezone, STORE_SCHEMA_VERSION)
+    store.ensure_schema()
     store.seed_whitelist(CONFIG.login_allowlist, CONFIG.teacher_emails)
     st.session_state.store_mode = "sqlite"
     st.session_state.data_store = store
@@ -1007,19 +1014,12 @@ def request_experience_research_consent() -> None:
 @st.dialog("是否作為研究素材", dismissible=False)
 def _open_experience_research_consent() -> None:
     st.markdown("這次你擔任個案。是否願意將此次晤談作為教學研究素材？")
-    st.markdown(
-        """
-| 選擇 | 說明 |
-| --- | --- |
-| 願意 | 保存可連結你帳號的晤談過程與示範解析。 |
-| 願意並勾選匿名 | 你的帳號只留完成紀錄；晤談過程另存不記名資料表，只留過程與時間。 |
-| 不願意 | 只留完成紀錄，不保存晤談過程、示範解析或諮商師原句。 |
-"""
-    )
     keep_col, drop_col = st.columns(2, gap="small")
     with keep_col:
         willing = st.button("願意", type="primary", use_container_width=True)
         anonymous = st.checkbox("匿名", key="experience_research_anonymous")
+        if anonymous:
+            st.caption("帳號只留完成紀錄；晤談過程另以不記名與時間保存。")
         if willing:
             finalize_session(consent="anonymous" if anonymous else "yes")
             st.rerun()
@@ -1053,7 +1053,12 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
         }
         persist_thread_state("active", include_turns=False)
         if chosen == "anonymous":
-            STORE.save_anonymous_transcript(session, st.session_state.turns)
+            save_anon = getattr(STORE, "save_anonymous_transcript", None)
+            if callable(save_anon):
+                save_anon(session, st.session_state.turns)
+            else:
+                from src.data_store import GoogleSheetsStore
+                GoogleSheetsStore.save_anonymous_transcript(STORE, session, st.session_state.turns)
         STORE.purge_session_transcript(session["session_id"])
         st.session_state.turns = []
         st.session_state.turn_reviews = []
