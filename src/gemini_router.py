@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import streamlit.components.v1 as components
 
@@ -14,6 +13,7 @@ _COMPONENT_DIR = Path(__file__).resolve().parent / "frontend" / "gemini_router"
 _gemini_router = components.declare_component("gemini_router", path=str(_COMPONENT_DIR))
 
 _RESULTS_KEY = "_gemini_router_results"
+_COMPONENT_KEY = "ct_gemini_router"
 
 
 class GeminiRouterPending(BaseException):
@@ -52,6 +52,71 @@ def _unwrap(raw: Any, service: GeminiService) -> str:
     return text
 
 
+def _normalize_results(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    items = raw.get("results")
+    if isinstance(items, list):
+        return {
+            str(item.get("request_id") or ""): item
+            for item in items
+            if isinstance(item, dict) and item.get("request_id")
+        }
+    if raw.get("request_id"):
+        return {str(raw["request_id"]): raw}
+    if isinstance(items, dict):
+        return {
+            str(key): dict(value)
+            for key, value in items.items()
+            if isinstance(value, dict)
+        }
+    return {}
+
+
+def keep_gemini_router_alive() -> None:
+    st = _st()
+    if st.session_state.get("_gemini_router_mounted"):
+        return
+    st.session_state["_gemini_router_mounted"] = True
+    _gemini_router(jobs=[], default=None, key=_COMPONENT_KEY)
+
+
+def run_browser_jobs(service: GeminiService, jobs: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    st = _st()
+    prepared: list[dict[str, Any]] = []
+    for job in jobs:
+        request_id = str(job.get("request_id") or job.get("call_id") or "").strip()
+        if not request_id:
+            continue
+        prepared.append({
+            "request_id": request_id,
+            "api_key": service.api_key,
+            "models": service._models_to_try(),
+            "prompt": str(job.get("prompt") or ""),
+            "system_instruction": str(job.get("system_instruction") or ""),
+            "temperature": float(job.get("temperature", 0.4)),
+            "max_output_tokens": int(job.get("max_output_tokens", 1200)),
+            "response_json": bool(job.get("response_json", False)),
+            "thinking_level": str(job.get("thinking_level") or "low"),
+            "attempts": int(job.get("attempts") or 2),
+        })
+    if not prepared:
+        return {}
+    cache = _results()
+    pending = [job for job in prepared if job["request_id"] not in cache]
+    if pending:
+        st.session_state["_gemini_router_mounted"] = True
+        raw = _gemini_router(jobs=pending, default=None, key=_COMPONENT_KEY)
+        received = _normalize_results(raw)
+        missing = [job["request_id"] for job in pending if job["request_id"] not in received]
+        if missing:
+            raise GeminiRouterPending()
+        for request_id, payload in received.items():
+            cache[request_id] = payload
+        st.session_state[_RESULTS_KEY] = cache
+    return {job["request_id"]: _unwrap(cache[job["request_id"]], service) for job in prepared}
+
+
 def generate_via_browser(
     service: GeminiService,
     prompt: str,
@@ -62,32 +127,17 @@ def generate_via_browser(
     max_output_tokens: int = 1200,
     response_json: bool = False,
     thinking_level: str = "low",
-    attempts: int = 3,
+    attempts: int = 2,
 ) -> str:
-    st = _st()
     job_id = str(call_id or "").strip() or "gemini"
-    cache = _results()
-    if job_id in cache:
-        return _unwrap(cache[job_id], service)
-
-    job = {
+    texts = run_browser_jobs(service, [{
         "request_id": job_id,
-        "api_key": service.api_key,
-        "models": service._models_to_try(),
         "prompt": prompt,
         "system_instruction": system_instruction or "",
-        "temperature": float(temperature),
-        "max_output_tokens": int(max_output_tokens),
-        "response_json": bool(response_json),
+        "temperature": temperature,
+        "max_output_tokens": max_output_tokens,
+        "response_json": response_json,
         "thinking_level": thinking_level,
-        "attempts": int(attempts),
-    }
-    spinner = getattr(st, "spinner", None)
-    context = spinner("正在由這個瀏覽器呼叫 Gemini…") if callable(spinner) else nullcontext()
-    with context:
-        raw = _gemini_router(job=job, default=None, key=f"ct_gemini_{job_id}")
-    if not isinstance(raw, dict) or str(raw.get("request_id") or "") != job_id:
-        raise GeminiRouterPending()
-    cache[job_id] = raw
-    st.session_state[_RESULTS_KEY] = cache
-    return _unwrap(raw, service)
+        "attempts": attempts,
+    }])
+    return texts[job_id]

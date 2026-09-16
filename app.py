@@ -39,9 +39,12 @@ from src.data_store import (
 )
 from src.browser_keys import render_saved_api_keys
 from src.gemini_client import GeminiService, parse_json_response
-from src.gemini_router import GeminiRouterPending
-from src.llm_pipeline import analyze_chat, create_counseling_plan, generate_chat_reply, generate_thought_coach_reply
+from src.gemini_router import GeminiRouterPending, keep_gemini_router_alive, run_browser_jobs
+from src.llm_pipeline import create_counseling_plan, generate_thought_coach_reply
 from src.prompts import (
+    analysis_for_chatbot,
+    build_chat_analysis_prompt,
+    build_dialogue_prompt,
     build_experience_analysis_prompt,
     build_practice_evaluator_prompt,
     build_snapshot_prompt,
@@ -124,6 +127,7 @@ def initialize_state() -> None:
 
 
 initialize_state()
+st.session_state["_gemini_router_mounted"] = False
 
 
 STORE_SCHEMA_VERSION = "anonymous-tables-1"
@@ -637,16 +641,72 @@ def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None)
 def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None:
     session = st.session_state.active_session
     turns = st.session_state.prior_turns_context + st.session_state.turns
-    show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
-    # 新模擬開場沒有學生話語，不必先打分析引擎，避免一次連發三個 Gemini 請求。
     should_analyze = (not is_opening) or bool(st.session_state.prior_turns_context)
     session_id = str(session.get("session_id") or "")
     turn_token = str(len(st.session_state.turns))
     if is_opening and _has_ai_turn():
         return
+    service = gemini()
+    chat_id = f"chat-{session_id}-{turn_token}"
+    chat_system, chat_prompt = build_dialogue_prompt(
+        mode=session["mode"],
+        school_id=session["school_id"],
+        selected_ids=session["selected_techniques"],
+        turns=turns,
+        latest_student_message=latest_student_message,
+        case_data=st.session_state.case_data,
+        continuation_snapshot=st.session_state.continuation_snapshot,
+        is_opening=is_opening,
+        counseling_plan=st.session_state.counseling_plan,
+        chat_analysis=analysis_for_chatbot(st.session_state.chat_analysis),
+    )
+    texts = run_browser_jobs(service, [{
+        "request_id": chat_id,
+        "prompt": chat_prompt,
+        "system_instruction": chat_system,
+        "temperature": 0.55,
+        "max_output_tokens": 550,
+    }])
+    role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
+    store_turn(new_turn(
+        session=session,
+        turn_index=len(st.session_state.turns) + 1,
+        speaker_role=role,
+        content=texts[chat_id],
+        timezone=CONFIG.timezone,
+        latency_ms=int(getattr(service, "last_latency_ms", 0) or 0),
+    ))
+    persist_thread_state("in_progress")
     if should_analyze:
-        st.session_state.chat_analysis = analyze_chat(
-            gemini(),
+        st.session_state.pending_analyze = {
+            "session_id": session_id,
+            "turn_token": turn_token,
+            "latest_student_message": latest_student_message,
+            "session_turn_count": int(turn_token),
+            "ai_turn_index": len(st.session_state.turns),
+        }
+    else:
+        st.session_state.pending_analyze = None
+
+
+def apply_pending_analysis() -> None:
+    pending = st.session_state.get("pending_analyze")
+    if not isinstance(pending, dict):
+        return
+    session = st.session_state.active_session or {}
+    session_id = str(session.get("session_id") or "")
+    if not session_id or session_id != str(pending.get("session_id") or ""):
+        st.session_state.pending_analyze = None
+        return
+    turn_token = str(pending.get("turn_token") or "")
+    analyze_id = f"analyze-{session_id}-{turn_token}"
+    count = int(pending.get("session_turn_count") or 0)
+    session_turns = list(st.session_state.turns or [])[:max(0, count)]
+    turns = list(st.session_state.prior_turns_context or []) + session_turns
+    latest_student_message = str(pending.get("latest_student_message") or "")
+    texts = run_browser_jobs(gemini(), [{
+        "request_id": analyze_id,
+        "prompt": build_chat_analysis_prompt(
             mode=session["mode"],
             school_id=session["school_id"],
             selected_ids=session["selected_techniques"],
@@ -655,45 +715,31 @@ def generate_ai_turn(is_opening: bool, latest_student_message: str = "") -> None
             turns=turns,
             latest_student_message=latest_student_message,
             difficulty=str(session.get("difficulty", "")),
-            call_id=f"analyze-{session_id}-{turn_token}",
+        ),
+        "system_instruction": "你是對話分析引擎，只輸出 JSON。",
+        "temperature": 0.1,
+        "max_output_tokens": 1600,
+        "response_json": True,
+    }])
+    try:
+        st.session_state.chat_analysis = parse_json_response(texts[analyze_id])
+    except Exception:
+        st.session_state.chat_analysis = dict(st.session_state.chat_analysis or {})
+    show_turn_review = turn_review_visible(str(session.get("difficulty", "")))
+    if show_turn_review and session["mode"] == "practice" and latest_student_message:
+        student_index = next(
+            (
+                int(turn["turn_index"])
+                for turn in reversed(session_turns)
+                if str(turn.get("speaker_role", "")).startswith("student")
+            ),
+            0,
         )
-        if show_turn_review and session["mode"] == "practice" and latest_student_message:
-            student_index = next(
-                (
-                    int(turn["turn_index"])
-                    for turn in reversed(st.session_state.turns)
-                    if str(turn.get("speaker_role", "")).startswith("student")
-                ),
-                0,
-            )
-            record_turn_review(student_index, st.session_state.chat_analysis)
-        persist_thread_state("in_progress")
-    response, latency = generate_chat_reply(
-        gemini(),
-        mode=session["mode"],
-        school_id=session["school_id"],
-        selected_ids=session["selected_techniques"],
-        turns=turns,
-        latest_student_message=latest_student_message,
-        case_data=st.session_state.case_data,
-        continuation_snapshot=st.session_state.continuation_snapshot,
-        counseling_plan=st.session_state.counseling_plan,
-        chat_analysis=st.session_state.chat_analysis,
-        is_opening=is_opening,
-        call_id=f"chat-{session_id}-{turn_token}",
-    )
-    role = "ai_client" if session["mode"] == "practice" else "ai_counselor"
-    store_turn(new_turn(
-        session=session,
-        turn_index=len(st.session_state.turns) + 1,
-        speaker_role=role,
-        content=response,
-        timezone=CONFIG.timezone,
-        latency_ms=latency,
-    ))
+        record_turn_review(student_index, st.session_state.chat_analysis)
     if show_turn_review and session["mode"] == "experience" and st.session_state.chat_analysis:
-        record_turn_review(len(st.session_state.turns), st.session_state.chat_analysis)
+        record_turn_review(int(pending.get("ai_turn_index") or 0), st.session_state.chat_analysis)
     persist_thread_state("in_progress")
+    st.session_state.pending_analyze = None
 
 
 def start_new_session(mode: str, school_id: str, selected_ids: list[str], theme: str, difficulty: str) -> None:
@@ -991,6 +1037,8 @@ def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> N
     text = str(st.session_state.get("pending_thought") or "").strip()
     if not text:
         return
+    if st.session_state.get("pending_ai_turn") or st.session_state.get("pending_analyze"):
+        return
     notes = list(st.session_state.get("coach_thoughts") or [])
     examples = analysis.get("example_replies")
     if not isinstance(examples, list):
@@ -1014,7 +1062,7 @@ def render_thought_coach(session: dict[str, Any], analysis: dict[str, Any]) -> N
         st.session_state.pending_thought_noted = ""
         st.rerun()
     except GeminiRouterPending:
-        raise
+        return
     except Exception as exc:
         notes.append({"role": "coach", "content": f"暫時無法回應這個想法：{exc}"})
         st.session_state.coach_thoughts = notes
@@ -1142,27 +1190,38 @@ def render_chat() -> None:
             return
         st.session_state.pending_ai_turn = prompt
     pending = str(st.session_state.get("pending_ai_turn") or "")
-    if not pending:
+    if pending:
+        try:
+            generate_ai_turn(is_opening=False, latest_student_message=pending)
+            st.session_state.pending_ai_turn = None
+            st.session_state.pending_student_stored = None
+            st.rerun()
+        except GeminiRouterPending:
+            return
+        except Exception as exc:
+            store_turn(new_turn(
+                session=session,
+                turn_index=len(st.session_state.turns) + 1,
+                speaker_role="system",
+                content="本輪模型暫時無法回應，請稍後再試或結束本次晤談。",
+                timezone=CONFIG.timezone,
+                error_flag=str(exc)[:300],
+            ))
+            st.session_state.pending_ai_turn = None
+            st.session_state.pending_student_stored = None
+            st.rerun()
         return
-    try:
-        generate_ai_turn(is_opening=False, latest_student_message=pending)
-        st.session_state.pending_ai_turn = None
-        st.session_state.pending_student_stored = None
-        st.rerun()
-    except GeminiRouterPending:
-        raise
-    except Exception as exc:
-        store_turn(new_turn(
-            session=session,
-            turn_index=len(st.session_state.turns) + 1,
-            speaker_role="system",
-            content="本輪模型暫時無法回應，請稍後再試或結束本次晤談。",
-            timezone=CONFIG.timezone,
-            error_flag=str(exc)[:300],
-        ))
-        st.session_state.pending_ai_turn = None
-        st.session_state.pending_student_stored = None
-        st.rerun()
+    if st.session_state.get("pending_analyze"):
+        try:
+            apply_pending_analysis()
+            st.rerun()
+        except GeminiRouterPending:
+            return
+        except Exception:
+            st.session_state.pending_analyze = None
+        return
+    if not st.session_state.get("pending_thought"):
+        keep_gemini_router_alive()
 
 
 def request_experience_research_consent() -> None:
@@ -1229,26 +1288,43 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
 
     raw = ""
     parsed: dict[str, Any]
-    try:
-        if session["mode"] == "practice":
-            prompt = build_practice_evaluator_prompt(
-                session["school_id"], session["selected_techniques"], st.session_state.turns
-            )
-        else:
-            prompt = build_experience_analysis_prompt(
-                session["school_id"], session["selected_techniques"], st.session_state.turns
-            )
-        raw = gemini().generate_text(
-            prompt,
-            system_instruction="你是形成性教學回饋評量器。只能根據逐字稿證據輸出 JSON。",
-            temperature=0.1,
-            max_output_tokens=3200,
-            response_json=True,
-            call_id=f"eval-{session['session_id']}",
+    eval_id = f"eval-{session['session_id']}"
+    snapshot_id = f"snapshot-{session['session_id']}"
+    if session["mode"] == "practice":
+        eval_prompt = build_practice_evaluator_prompt(
+            session["school_id"], session["selected_techniques"], st.session_state.turns
         )
-        parsed = parse_json_response(raw)
+    else:
+        eval_prompt = build_experience_analysis_prompt(
+            session["school_id"], session["selected_techniques"], st.session_state.turns
+        )
+    try:
+        texts = run_browser_jobs(gemini(), [
+            {
+                "request_id": eval_id,
+                "prompt": eval_prompt,
+                "system_instruction": "你是形成性教學回饋評量器。只能根據逐字稿證據輸出 JSON。",
+                "temperature": 0.1,
+                "max_output_tokens": 3200,
+                "response_json": True,
+            },
+            {
+                "request_id": snapshot_id,
+                "prompt": build_snapshot_prompt(
+                    session["mode"], session["school_id"], session["selected_techniques"],
+                    st.session_state.turns, st.session_state.continuation_snapshot,
+                ),
+                "system_instruction": "你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
+                "temperature": 0.1,
+                "max_output_tokens": 1600,
+                "response_json": True,
+            },
+        ])
     except GeminiRouterPending:
         raise
+    raw = texts.get(eval_id, "")
+    try:
+        parsed = parse_json_response(raw)
     except Exception as exc:
         parsed = {
             "total_score": None,
@@ -1256,6 +1332,16 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
             "improvement_points": [],
             "encouragement": "本次晤談與逐字稿已完整保存；評量服務暫時無法完成，可請教師稍後重新檢視。",
             "limitations": str(exc),
+        }
+    try:
+        snapshot = parse_json_response(texts.get(snapshot_id, ""))
+    except Exception:
+        snapshot = {
+            "continuation_role": session["continuation_role"],
+            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
+            "disclosed_topics": [],
+            "unfinished_issues": [],
+            "next_session_focus": [],
         }
 
     assessment_id = str(st.session_state.setdefault(f"_assessment_id_{session['session_id']}", str(uuid.uuid4())))
@@ -1283,30 +1369,6 @@ def finalize_session(*, keep_transcript: bool = True, consent: str | None = None
         st.session_state._assessment_saved_for = session["session_id"]
     st.session_state.assessment = parsed
     st.session_state.raw_assessment = raw
-
-    try:
-        snapshot_raw = gemini().generate_text(
-            build_snapshot_prompt(
-                session["mode"], session["school_id"], session["selected_techniques"],
-                st.session_state.turns, st.session_state.continuation_snapshot,
-            ),
-            system_instruction="你是續談狀態摘要器，只輸出不含可識別資訊的 JSON。",
-            temperature=0.1,
-            max_output_tokens=1600,
-            response_json=True,
-            call_id=f"snapshot-{session['session_id']}",
-        )
-        snapshot = parse_json_response(snapshot_raw)
-    except GeminiRouterPending:
-        raise
-    except Exception:
-        snapshot = {
-            "continuation_role": session["continuation_role"],
-            "relationship_summary": "本次逐字稿已保存，續談時可由最近對話接續。",
-            "disclosed_topics": [],
-            "unfinished_issues": [],
-            "next_session_focus": [],
-        }
     st.session_state.continuation_snapshot = snapshot
     persist_thread_state("active", include_turns=True)
 
@@ -1461,7 +1523,7 @@ def student_page() -> None:
             st.session_state.pending_start_new = None
             st.rerun()
         except GeminiRouterPending:
-            raise
+            pass
         except Exception as exc:
             st.session_state.pending_start_new = None
             st.error(f"無法開始模擬：{exc}")
@@ -1473,7 +1535,7 @@ def student_page() -> None:
             st.session_state.pending_continuation = None
             st.rerun()
         except GeminiRouterPending:
-            raise
+            pass
         except Exception as exc:
             st.session_state.pending_continuation = None
             st.error(f"無法開始續談：{exc}")
@@ -1485,7 +1547,7 @@ def student_page() -> None:
             st.session_state.pending_finalize = None
             st.rerun()
         except GeminiRouterPending:
-            raise
+            pass
         except Exception as exc:
             st.session_state.pending_finalize = None
             st.error(f"結束晤談時發生問題：{exc}")

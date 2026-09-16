@@ -76,7 +76,7 @@
       }
 
       function backoff(attempt) {
-        return 800 * Math.pow(2, attempt);
+        return Math.min(800, 200 * Math.pow(2, attempt));
       }
 
       function generateOnce(model, args) {
@@ -112,9 +112,8 @@
 
       function run(args) {
         var models = (args.models && args.models.length) ? args.models : [];
-        var attempts = Math.max(1, Number(args.attempts) || 3);
+        var attempts = Math.max(1, Number(args.attempts) || 2);
         var lastError = "Gemini 呼叫失敗。";
-        var chain = Promise.resolve();
         var resultValue = null;
 
         function tryModel(modelIndex) {
@@ -173,8 +172,7 @@
           return tryAttempt(0);
         }
 
-        chain = tryModel(0);
-        return chain.then(function () {
+        return tryModel(0).then(function () {
           return resultValue || {
             request_id: args.request_id,
             text: "",
@@ -185,24 +183,43 @@
         });
       }
 
-      var lastRequestId = "";
+      var lastBatchId = "";
       var inFlight = false;
+      var queuedJobs = null;
+
+      function startBatch(jobs) {
+        lastBatchId = jobs.map(function (job) { return job.request_id; }).join("|");
+        inFlight = true;
+        Promise.all(jobs.map(run)).then(function (values) {
+          inFlight = false;
+          var next = queuedJobs;
+          queuedJobs = null;
+          setValue({ results: values });
+          setHeight(1);
+          if (next && next.length) {
+            var nextId = next.map(function (job) { return job.request_id; }).join("|");
+            if (nextId !== lastBatchId) startBatch(next);
+          }
+        });
+      }
 
       window.addEventListener("message", function (event) {
         if (!event.data || event.data.type !== "streamlit:render") return;
         var args = event.data.args || {};
-        var job = args.job || {};
+        var jobs = args.jobs;
+        if (!jobs || !jobs.length) {
+          jobs = (args.job && args.job.request_id) ? [args.job] : [];
+        }
         setHeight(1);
-        if (!job.request_id || !job.api_key) return;
-        if (job.request_id === lastRequestId) return;
-        if (inFlight) return;
-        lastRequestId = job.request_id;
-        inFlight = true;
-        run(job).then(function (value) {
-          inFlight = false;
-          setValue(value);
-          setHeight(1);
-        });
+        if (!jobs.length) return;
+        if (!jobs[0].api_key) return;
+        var batchId = jobs.map(function (job) { return job.request_id; }).join("|");
+        if (batchId === lastBatchId) return;
+        if (inFlight) {
+          queuedJobs = jobs;
+          return;
+        }
+        startBatch(jobs);
       });
 
       post("streamlit:componentReady", { apiVersion: 1 });

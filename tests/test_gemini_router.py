@@ -1,8 +1,7 @@
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.gemini_router import GeminiRouterPending, generate_via_browser
+from src.gemini_router import GeminiRouterPending, generate_via_browser, run_browser_jobs
 
 
 def _service() -> SimpleNamespace:
@@ -27,6 +26,8 @@ def test_gemini_router_html_posts_generate_content_and_retries():
     assert "generateContent" in html
     assert "thinkingConfig" in html
     assert "status === 429" in html
+    assert "Promise.all" in html
+    assert "queuedJobs" in html
     assert "generativelanguage.googleapis.com" in html
     assert "resultValue = {" in html
     assert "error: errText" in html
@@ -35,19 +36,22 @@ def test_gemini_router_html_posts_generate_content_and_retries():
 def test_generate_via_browser_returns_cached_call_id(monkeypatch):
     import src.gemini_router as router
 
-    state = {}
-    dummy_st = SimpleNamespace(session_state=state, spinner=lambda *_a, **_k: nullcontext())
+    state = {"_gemini_router_mounted": False}
+    dummy_st = SimpleNamespace(session_state=state)
     calls = {"n": 0}
 
     def fake_component(**kwargs):
         calls["n"] += 1
-        job = kwargs["job"]
+        assert kwargs["key"] == "ct_gemini_router"
+        jobs = kwargs["jobs"]
         return {
-            "request_id": job["request_id"],
-            "text": "pong",
-            "model": "gemini-flash-latest",
-            "latency_ms": 12,
-            "error": "",
+            "results": [{
+                "request_id": jobs[0]["request_id"],
+                "text": "pong",
+                "model": "gemini-flash-latest",
+                "latency_ms": 12,
+                "error": "",
+            }]
         }
 
     monkeypatch.setattr(router, "_st", lambda: dummy_st)
@@ -60,10 +64,64 @@ def test_generate_via_browser_returns_cached_call_id(monkeypatch):
     assert service.last_latency_ms == 12
 
 
+def test_run_browser_jobs_batches_and_ignores_stale_results(monkeypatch):
+    import src.gemini_router as router
+
+    state = {"_gemini_router_mounted": False}
+    dummy_st = SimpleNamespace(session_state=state)
+
+    def stale_component(**kwargs):
+        return {
+            "results": [{
+                "request_id": "old",
+                "text": "stale",
+                "model": "gemini-flash-latest",
+                "latency_ms": 1,
+                "error": "",
+            }]
+        }
+
+    monkeypatch.setattr(router, "_st", lambda: dummy_st)
+    monkeypatch.setattr(router, "_gemini_router", stale_component)
+    try:
+        run_browser_jobs(_service(), [
+            {"request_id": "analyze-S1-1", "prompt": "a"},
+            {"request_id": "chat-S1-1", "prompt": "b"},
+        ])
+    except GeminiRouterPending:
+        pass
+    else:
+        raise AssertionError("expected GeminiRouterPending for stale results")
+
+    def fresh_component(**kwargs):
+        jobs = kwargs["jobs"]
+        return {
+            "results": [
+                {
+                    "request_id": job["request_id"],
+                    "text": job["request_id"] + "-ok",
+                    "model": "gemini-flash-latest",
+                    "latency_ms": 4,
+                    "error": "",
+                }
+                for job in jobs
+            ]
+        }
+
+    state["_gemini_router_mounted"] = False
+    monkeypatch.setattr(router, "_gemini_router", fresh_component)
+    texts = run_browser_jobs(_service(), [
+        {"request_id": "analyze-S1-1", "prompt": "a"},
+        {"request_id": "chat-S1-1", "prompt": "b"},
+    ])
+    assert texts["analyze-S1-1"] == "analyze-S1-1-ok"
+    assert texts["chat-S1-1"] == "chat-S1-1-ok"
+
+
 def test_generate_via_browser_raises_pending_until_result(monkeypatch):
     import src.gemini_router as router
 
-    dummy_st = SimpleNamespace(session_state={}, spinner=lambda *_a, **_k: nullcontext())
+    dummy_st = SimpleNamespace(session_state={"_gemini_router_mounted": False})
     monkeypatch.setattr(router, "_st", lambda: dummy_st)
     monkeypatch.setattr(router, "_gemini_router", lambda **_kwargs: None)
     try:
