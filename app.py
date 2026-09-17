@@ -1415,9 +1415,9 @@ def render_chat() -> None:
         if not review:
             return
         if session["mode"] == "practice" and role == "student_counselor":
-            verdict = review.get("verdict") or "回饋"
-            comment = review.get("comment") or ""
-            st.caption(f"即時回饋 · {verdict}" + (f"：{comment}" if comment else ""))
+            verdict = str(review.get("verdict") or "").strip() or "回饋"
+            comment = str(review.get("comment") or "").strip()
+            st.caption(f"{verdict}，{comment}" if comment else verdict)
         elif session["mode"] == "experience" and role == "ai_counselor":
             goal = str(review.get("goal") or "").strip()
             effect = str(review.get("effect") or "").strip()
