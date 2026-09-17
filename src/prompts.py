@@ -73,7 +73,7 @@ def build_counseling_plan_prompt(
     school = get_school(school_id)
     knowledge = build_knowledge_block(school_id, selected_ids)
     prior = {
-        "prior_snapshot": prior_snapshot or {},
+        "prior_snapshot": snapshot_for_dialogue(prior_snapshot),
         "prior_plan": prior_plan or {},
         "prior_analysis": prior_analysis or {},
     }
@@ -85,6 +85,7 @@ def build_counseling_plan_prompt(
 主題：{theme}
 難度：{difficulty}
 前次狀態：{json.dumps(prior, ensure_ascii=False)}
+續談時延續同一人物與已談內容，但不要把尚未完成議題寫成學生應先完成的目標清單；形成晤談目標是學生諮商師的任務。
 
 請建立虛構成人或大學生個案，讓三項指定技巧都有合理機會，但不可在開場一次揭露答案。不要使用真實人物或危機情節。info_targets 是學生諮商師依本學派需要探問／觀察的資訊；status 初始為 pending。technique_id 只能出自知識庫。
 只輸出 JSON：
@@ -112,6 +113,7 @@ def build_counseling_plan_prompt(
 主題：{theme}
 難度：{difficulty}
 前次狀態：{json.dumps(prior, ensure_ascii=False)}
+續談時延續同一示範諮商師與已談內容，但不要把尚未完成議題當成開場目標清單；從當下對話中探問與形成焦點。
 
 info_targets 必須貼近該學派蒐集資料的方式，不得發明知識庫以外的技巧名稱。status 初始為 pending。晤談中仍不得對學生說出技巧名稱或講課。
 只輸出 JSON：
@@ -171,6 +173,14 @@ def analysis_for_chatbot(analysis: dict[str, Any] | None) -> dict[str, Any] | No
     hidden.pop("example_replies", None)
     hidden.pop("turn_review", None)
     return hidden
+
+
+def snapshot_for_dialogue(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep role continuity, but do not hand leftover goals to the model as an agenda."""
+    data = dict(snapshot or {})
+    data.pop("unfinished_issues", None)
+    data.pop("next_session_focus", None)
+    return data
 
 
 def _analyzer_visible_instructions(mode: str, difficulty: str) -> tuple[str, str]:
@@ -286,7 +296,7 @@ def build_dialogue_prompt(
 ) -> tuple[str, str]:
     school = get_school(school_id)
     history = transcript_text(turns) or "（尚無先前對話）"
-    continuation = json.dumps(continuation_snapshot or {}, ensure_ascii=False)
+    continuation = json.dumps(snapshot_for_dialogue(continuation_snapshot), ensure_ascii=False)
     plan = json.dumps(counseling_plan or case_data or {}, ensure_ascii=False)
     analysis = json.dumps(chat_analysis or {}, ensure_ascii=False)
     knowledge = build_knowledge_block(school_id, selected_ids)
@@ -297,10 +307,12 @@ def build_dialogue_prompt(
         practice_tail = (
             f"學生諮商師最新一句：{latest_student_message}\n"
             "請只以同一位個案身分自然回應；next_focus 只影響你揭露的節奏與內容，不可變成教師。"
+            "不要主動說出尚未完成議題或本次應達成的目標清單；形成晤談目標是學生諮商師的任務。"
         )
         experience_tail = (
             f"學生個案最新一句：{latest_student_message}\n"
             "請只以同一位示範諮商師身分回應；朝向 next_focus 蒐集必要資訊，但一次一個焦點。"
+            "不要主動列出尚未完成議題或本次目標清單；從當下對話中探問與形成焦點。"
         )
 
     if mode == "practice":

@@ -8,6 +8,7 @@ from src.prompts import (
     build_thought_coach_prompt,
     live_coaching_enabled,
     live_plan_visible,
+    snapshot_for_dialogue,
     thought_coach_visible,
     turn_review_visible,
     uses_planner_llm,
@@ -26,7 +27,36 @@ def test_practice_dialogue_prompt_keeps_ai_as_client():
     assert "只能扮演標準化模擬個案" in system
     assert "不得變成教師" in system
     assert "學生諮商師最新一句" in prompt
+    assert "形成晤談目標是學生諮商師的任務" in prompt
     assert "知識庫" in prompt
+
+
+def test_dialogue_and_planner_omit_unfinished_agenda():
+    snapshot = {
+        "relationship_summary": "關係尚可",
+        "disclosed_topics": ["睡眠"],
+        "unfinished_issues": ["秘密目標-失業"],
+        "next_session_focus": ["下次先處理失業"],
+    }
+    _, chat = build_dialogue_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED, turns=[],
+        latest_student_message="你聽起來很累。", case_data={"case_id": "demo"},
+        continuation_snapshot=snapshot,
+    )
+    plan = build_counseling_plan_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED,
+        theme="續談上次議題", difficulty="中階",
+        prior_snapshot=snapshot,
+    )
+    cleaned = snapshot_for_dialogue(snapshot)
+    assert "秘密目標-失業" not in chat
+    assert "下次先處理失業" not in chat
+    assert "形成晤談目標是學生諮商師的任務" in chat
+    assert "秘密目標-失業" not in plan
+    assert "下次先處理失業" not in plan
+    assert "unfinished_issues" not in cleaned
+    assert "next_session_focus" not in cleaned
+    assert cleaned["relationship_summary"] == "關係尚可"
 
 
 def test_dialogue_and_analysis_prompts_keep_early_turns():
@@ -71,6 +101,7 @@ def test_experience_dialogue_forbids_technique_names():
     assert "不得揭露技巧名稱" in system
     assert "示範諮商師" in system
     assert "技巧名稱" in prompt
+    assert "不要主動列出尚未完成議題" in prompt
 
 
 def test_knowledge_block_uses_library_ids_only():

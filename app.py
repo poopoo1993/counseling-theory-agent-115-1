@@ -51,6 +51,7 @@ from src.llm_pipeline import (
     build_thought_job,
 )
 from src.prompts import (
+    analysis_for_chatbot,
     case_data_from_plan,
     live_plan_visible,
     thought_coach_visible,
@@ -761,7 +762,9 @@ def _commit_continuation(thread: dict[str, Any], selected_ids: list[str], *, pla
     _reset_live_session_fields()
     st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
     st.session_state.counseling_plan = plan if plan is not None else parse_json_cell(thread.get("counseling_plan"), {})
-    st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
+    st.session_state.chat_analysis = analysis_for_chatbot(
+        parse_json_cell(thread.get("chat_analysis"), {}),
+    ) or {}
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = _load_prior_transcript(thread)
     if mode == "practice" and plan is not None:
@@ -1314,7 +1317,7 @@ def continuation_panel() -> None:
         render_role_callout("experience" if thread.get("mode") == "experience" else "practice")
         if thread.get("mode") == "experience":
             selected = list(school["experience_default"])
-            st.caption("續談會載入同一位 AI 諮商師、同一學派、前次工作焦點與上次完整對話。")
+            st.caption("續談會載入同一位 AI 諮商師、同一學派與上次完整對話。")
             render_technique_cards(get_techniques(school_id, selected))
         else:
             option_ids = [t["id"] for t in school["techniques"]]
@@ -1327,12 +1330,7 @@ def continuation_panel() -> None:
                 format_func=lambda x: name_map[x],
                 max_selections=3,
             )
-            st.caption("續談會載入同一位 AI 個案、已揭露內容、關係狀態、未完成議題與上次完整對話。")
-        snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
-        unfinished = snapshot.get("unfinished_issues") or []
-        if unfinished:
-            st.caption("前次尚未完成")
-            render_chips(unfinished)
+            st.caption("續談會載入同一位 AI 個案、已揭露內容、關係狀態與上次完整對話。")
     ready = len(selected) == 3
     if st.button("開始續談", type="primary", use_container_width=True, disabled=not ready):
         if len(selected) != 3:

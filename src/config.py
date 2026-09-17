@@ -87,7 +87,7 @@ class AppConfig:
                 _string_tuple(app.get("fallback_models"), DEFAULT_FALLBACK_MODELS),
                 canonical_model_name(str(app.get("model_name", DEFAULT_MODEL_NAME))),
             ),
-            prompt_version=str(app.get("prompt_version", "theory-dialogue-v1.5")),
+            prompt_version=str(app.get("prompt_version", "theory-dialogue-v1.6")),
             rubric_version=str(app.get("rubric_version", "theory-rubric-v1.0")),
             allowed_domains=allowed_domains,
             login_allowlist=login_allowlist,
