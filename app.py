@@ -51,7 +51,6 @@ from src.llm_pipeline import (
     build_thought_job,
 )
 from src.prompts import (
-    analysis_for_chatbot,
     case_data_from_plan,
     live_plan_visible,
     thought_coach_visible,
@@ -762,9 +761,7 @@ def _commit_continuation(thread: dict[str, Any], selected_ids: list[str], *, pla
     _reset_live_session_fields()
     st.session_state.case_data = parse_json_cell(thread.get("case_data"), None)
     st.session_state.counseling_plan = plan if plan is not None else parse_json_cell(thread.get("counseling_plan"), {})
-    st.session_state.chat_analysis = analysis_for_chatbot(
-        parse_json_cell(thread.get("chat_analysis"), {}),
-    ) or {}
+    st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
     st.session_state.prior_turns_context = _load_prior_transcript(thread)
     if mode == "practice" and plan is not None:
@@ -840,7 +837,7 @@ def start_continuation(thread: dict[str, Any], selected_ids: list[str]) -> None:
     difficulty = prior_difficulty if prior_difficulty and prior_difficulty != "延續前次" else "中階"
     flow.clear_jobs(st.session_state)
     flow.set_phase(st.session_state, flow.OPENING)
-    if uses_planner_llm(mode, difficulty):
+    if uses_planner_llm(mode, difficulty) and not live_plan_visible(difficulty):
         flow.enqueue(st.session_state, build_plan_job(
             mode=mode,
             school_id=school_id,
