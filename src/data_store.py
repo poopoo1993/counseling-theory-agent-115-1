@@ -918,6 +918,23 @@ class GoogleSheetsStore(WhitelistMixin, LoginSessionMixin):
         rows = [r for r in self.all_records("ChatLogs") if str(r.get("session_id")) == session_id]
         return sorted(rows, key=lambda r: int(r.get("turn_index", 0) or 0))
 
+    def thread_turns(self, thread_id: str) -> list[dict[str, Any]]:
+        wanted = str(thread_id or "").strip()
+        if not wanted:
+            return []
+        rows = [
+            row for row in self.all_records("ChatLogs")
+            if str(row.get("conversation_thread_id") or "") == wanted
+        ]
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("timestamp") or ""),
+                str(row.get("session_id") or ""),
+                int(row.get("turn_index") or 0),
+            ),
+        )
+
     def get_assessment(self, session_id: str) -> dict[str, Any] | None:
         rows = [r for r in self.all_records("Assessments") if str(r.get("session_id")) == session_id]
         return rows[-1] if rows else None
@@ -973,6 +990,7 @@ class MemoryStore(WhitelistMixin, LoginSessionMixin):
     save_setting = GoogleSheetsStore.save_setting
     count_sessions = GoogleSheetsStore.count_sessions
     session_turns = GoogleSheetsStore.session_turns
+    thread_turns = GoogleSheetsStore.thread_turns
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
     purge_session_transcript = GoogleSheetsStore.purge_session_transcript
@@ -1077,6 +1095,7 @@ class SqliteStore(WhitelistMixin, LoginSessionMixin):
     save_setting = GoogleSheetsStore.save_setting
     count_sessions = GoogleSheetsStore.count_sessions
     session_turns = GoogleSheetsStore.session_turns
+    thread_turns = GoogleSheetsStore.thread_turns
     get_assessment = GoogleSheetsStore.get_assessment
     add_teacher_grade = GoogleSheetsStore.add_teacher_grade
     purge_session_transcript = GoogleSheetsStore.purge_session_transcript

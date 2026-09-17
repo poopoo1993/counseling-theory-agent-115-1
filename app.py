@@ -646,6 +646,25 @@ def _dialogue_turns() -> list[dict[str, Any]]:
     return list(st.session_state.prior_turns_context or []) + list(st.session_state.turns or [])
 
 
+def _load_prior_transcript(thread: Mapping[str, Any]) -> list[dict[str, Any]]:
+    thread_id = str(thread.get("conversation_thread_id") or "")
+    try:
+        rows = STORE.thread_turns(thread_id)
+    except Exception:
+        rows = []
+    if rows:
+        return rows
+    last_id = str(thread.get("last_session_id") or "")
+    if last_id:
+        try:
+            rows = STORE.session_turns(last_id)
+        except Exception:
+            rows = []
+        if rows:
+            return rows
+    return parse_json_cell(thread.get("recent_turns"), [])
+
+
 def _ending_session() -> bool:
     return flow.phase(st.session_state) == flow.ENDING or bool(st.session_state.get("pending_finalize"))
 
@@ -654,6 +673,9 @@ def _enqueue_opening_chat() -> None:
     session = st.session_state.active_session or {}
     session_id = str(session.get("session_id") or "")
     if not session_id or _has_ai_turn():
+        return
+    if st.session_state.prior_turns_context:
+        flow.set_phase(st.session_state, flow.LIVE)
         return
     flow.set_phase(st.session_state, flow.OPENING)
     flow.enqueue(st.session_state, build_chat_job(
@@ -741,12 +763,15 @@ def _commit_continuation(thread: dict[str, Any], selected_ids: list[str], *, pla
     st.session_state.counseling_plan = plan if plan is not None else parse_json_cell(thread.get("counseling_plan"), {})
     st.session_state.chat_analysis = parse_json_cell(thread.get("chat_analysis"), {})
     st.session_state.continuation_snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
-    st.session_state.prior_turns_context = parse_json_cell(thread.get("recent_turns"), [])
+    st.session_state.prior_turns_context = _load_prior_transcript(thread)
     if mode == "practice" and plan is not None:
         st.session_state.case_data = case_data_from_plan(plan) or st.session_state.case_data
     STORE.start_session(session)
     persist_thread_state("in_progress")
-    flow.set_phase(st.session_state, flow.OPENING)
+    flow.set_phase(
+        st.session_state,
+        flow.LIVE if st.session_state.prior_turns_context else flow.OPENING,
+    )
 
 
 def record_turn_review(student_turn_index: int, analysis: dict[str, Any] | None) -> None:
@@ -1289,7 +1314,7 @@ def continuation_panel() -> None:
         render_role_callout("experience" if thread.get("mode") == "experience" else "practice")
         if thread.get("mode") == "experience":
             selected = list(school["experience_default"])
-            st.caption("續談會載入同一位 AI 諮商師、同一學派與前次工作焦點。")
+            st.caption("續談會載入同一位 AI 諮商師、同一學派、前次工作焦點與上次完整對話。")
             render_technique_cards(get_techniques(school_id, selected))
         else:
             option_ids = [t["id"] for t in school["techniques"]]
@@ -1302,7 +1327,7 @@ def continuation_panel() -> None:
                 format_func=lambda x: name_map[x],
                 max_selections=3,
             )
-            st.caption("續談會載入同一位 AI 個案、已揭露內容、關係狀態與未完成議題。")
+            st.caption("續談會載入同一位 AI 個案、已揭露內容、關係狀態、未完成議題與上次完整對話。")
         snapshot = parse_json_cell(thread.get("latest_snapshot"), {})
         unfinished = snapshot.get("unfinished_issues") or []
         if unfinished:
@@ -1463,7 +1488,18 @@ def render_chat() -> None:
                     else:
                         st.session_state.pending_finalize = {"consent": "yes"}
                         st.rerun()
-        for turn in st.session_state.turns:
+        prior = list(st.session_state.prior_turns_context or [])
+        current = list(st.session_state.turns or [])
+        if prior:
+            st.caption("上次晤談")
+        for turn in prior:
+            role = str(turn.get("speaker_role") or "")
+            with st.chat_message("user" if role.startswith("student") else "assistant"):
+                st.caption(ROLE_LABELS.get(role, role))
+                st.write(turn.get("content_raw") or "")
+        if prior and current:
+            st.caption("本次續談")
+        for turn in current:
             role = str(turn["speaker_role"])
             with st.chat_message("user" if role.startswith("student") else "assistant"):
                 st.caption(ROLE_LABELS.get(role, role))

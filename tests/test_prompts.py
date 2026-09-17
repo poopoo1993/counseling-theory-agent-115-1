@@ -29,6 +29,37 @@ def test_practice_dialogue_prompt_keeps_ai_as_client():
     assert "知識庫" in prompt
 
 
+def test_dialogue_and_analysis_prompts_keep_early_turns():
+    turns = [
+        {
+            "speaker_role": "ai_client" if index == 0 else "student_counselor",
+            "content_raw": f"早期線索-{index}" if index == 0 else f"後續-{index}",
+        }
+        for index in range(20)
+    ]
+    _, chat = build_dialogue_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED, turns=turns,
+        latest_student_message="後續-19", case_data={"case_id": "demo"},
+        continuation_snapshot=None,
+    )
+    analysis = build_chat_analysis_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED,
+        counseling_plan={}, prior_analysis={}, turns=turns,
+        latest_student_message="後續-19",
+    )
+    thought_system, thought = build_thought_coach_prompt(
+        mode="practice", school_id="cbt", selected_ids=SELECTED,
+        turns=turns, student_guide="", example_replies=[],
+        prior_notes=[], latest_thought="先前提過的線索還在嗎？",
+    )
+    assert "早期線索-0" in chat
+    assert "完整逐字稿" in chat
+    assert "早期線索-0" in analysis
+    assert "完整逐字稿" in analysis
+    assert "早期線索-0" in thought
+    assert "教學督導" in thought_system
+
+
 def test_experience_dialogue_forbids_technique_names():
     system, prompt = build_dialogue_prompt(
         mode="experience", school_id="cbt", selected_ids=SELECTED, turns=[],

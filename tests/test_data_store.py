@@ -15,6 +15,32 @@ def test_memory_store_preserves_identity_thread_and_raw_turn():
     assert store.list_threads(participant_id)[0]["conversation_thread_id"] == "T1"
 
 
+def test_thread_turns_return_full_prior_transcript():
+    store = MemoryStore("Asia/Taipei")
+    store.append_turn({
+        "session_id": "S1", "conversation_thread_id": "T-full",
+        "turn_index": 1, "timestamp": "2026-01-01T10:00:00+08:00",
+        "speaker_role": "ai_client", "content_raw": "第一句",
+    })
+    store.append_turn({
+        "session_id": "S1", "conversation_thread_id": "T-full",
+        "turn_index": 2, "timestamp": "2026-01-01T10:00:10+08:00",
+        "speaker_role": "student_counselor", "content_raw": "你聽起來很累。",
+    })
+    store.append_turn({
+        "session_id": "S2", "conversation_thread_id": "T-full",
+        "turn_index": 1, "timestamp": "2026-01-08T10:00:00+08:00",
+        "speaker_role": "ai_client", "content_raw": "後來還是睡不好。",
+    })
+    store.append_turn({
+        "session_id": "S-other", "conversation_thread_id": "T-other",
+        "turn_index": 1, "timestamp": "2026-01-01T09:00:00+08:00",
+        "speaker_role": "ai_client", "content_raw": "別的歷程",
+    })
+    texts = [row["content_raw"] for row in store.thread_turns("T-full")]
+    assert texts == ["第一句", "你聽起來很累。", "後來還是睡不好。"]
+
+
 def test_list_threads_only_returns_active_rows():
     store = MemoryStore("Asia/Taipei")
     participant_id = store.get_or_create_participant("student@hcu.edu.tw", "student", "test-salt")
@@ -227,6 +253,7 @@ def test_google_sheets_store_includes_login_session_mixin():
     assert hasattr(GoogleSheetsStore, "create_login_session")
     assert hasattr(GoogleSheetsStore, "touch_login_session")
     assert hasattr(GoogleSheetsStore, "list_online_users")
+    assert hasattr(GoogleSheetsStore, "thread_turns")
 
 
 def test_choose_store_backend_uses_sheets_when_secrets_present():

@@ -94,7 +94,7 @@ class AppConfig:
             teacher_emails=teacher_emails,
             otp_ttl_seconds=int(auth.get("otp_ttl_seconds", 600)),
             max_input_chars=int(app.get("max_input_chars", 800)),
-            recent_context_turns=int(app.get("recent_context_turns", 14)),
+            recent_context_turns=int(app.get("recent_context_turns", 0)),
             gemini_free_rpm=int(app.get("gemini_free_rpm", DEFAULT_FREE_RPM)),
             gemini_free_rpd=int(app.get("gemini_free_rpd", DEFAULT_FREE_RPD)),
             gemini_free_tpm=int(app.get("gemini_free_tpm", DEFAULT_FREE_TPM)),

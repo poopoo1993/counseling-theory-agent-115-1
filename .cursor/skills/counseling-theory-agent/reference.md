@@ -120,7 +120,7 @@ Also: `strengths`, `improvement_points`, `alternative_responses`, `encouragement
 
 `continuation_role`, `relationship_summary`, `disclosed_topics`, `emotional_state`, `prior_interventions`, `student_response_patterns`, `unfinished_issues`, `next_session_focus`, `ai_role_consistency`.
 
-Thread stores last **6** turns as `recent_turns`. Dialogue prompt also receives the snapshot plus up to 14 recent turns (current + prior context).
+Thread stores last **6** turns as `recent_turns` (fallback if ChatLogs were purged). Dialogue, analyzer, and thought prompts receive the **full** prior+current transcript plus the snapshot.
 
 ## Gemini call defaults
 

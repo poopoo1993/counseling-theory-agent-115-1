@@ -220,7 +220,7 @@ def build_chat_analysis_prompt(
     difficulty: str = "",
 ) -> str:
     knowledge = build_knowledge_block(school_id, selected_ids)
-    history = transcript_text(turns[-14:]) or "（尚無先前對話）"
+    history = transcript_text(turns) or "（尚無先前對話）"
     plan_json = json.dumps(counseling_plan or {}, ensure_ascii=False)
     analysis_json = json.dumps(prior_analysis or {}, ensure_ascii=False)
     visible, extra_json = _analyzer_visible_instructions(mode, difficulty)
@@ -233,7 +233,7 @@ def build_chat_analysis_prompt(
 難度：{difficulty or "未指定"}
 諮商計畫：{plan_json}
 前次分析：{analysis_json}
-最近逐字稿：
+完整逐字稿：
 {history}
 學生最新一句：{latest_student_message or "（開場，尚無學生新句）"}
 
@@ -285,8 +285,7 @@ def build_dialogue_prompt(
     chat_analysis: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     school = get_school(school_id)
-    recent = turns[-14:]
-    history = transcript_text(recent) or "（尚無先前對話）"
+    history = transcript_text(turns) or "（尚無先前對話）"
     continuation = json.dumps(continuation_snapshot or {}, ensure_ascii=False)
     plan = json.dumps(counseling_plan or case_data or {}, ensure_ascii=False)
     analysis = json.dumps(chat_analysis or {}, ensure_ascii=False)
@@ -317,7 +316,7 @@ def build_dialogue_prompt(
 內部對話分析：{analysis}
 固定個案設定：{json.dumps(case_data or {}, ensure_ascii=False)}
 續談快照：{continuation}
-最近逐字稿：
+完整逐字稿：
 {history}
 
 {practice_tail}"""
@@ -333,7 +332,7 @@ def build_dialogue_prompt(
 內部諮商計畫：{plan}
 內部對話分析：{analysis}
 續談快照：{continuation}
-最近逐字稿：
+完整逐字稿：
 {history}
 
 {experience_tail}"""
@@ -441,7 +440,7 @@ def build_thought_coach_prompt(
     latest_thought: str,
 ) -> tuple[str, str]:
     knowledge = build_knowledge_block(school_id, selected_ids)
-    history = transcript_text(turns[-8:]) or "（尚無模擬對話）"
+    history = transcript_text(turns) or "（尚無模擬對話）"
     notes = "\n".join(
         f"{'學生' if item.get('role') == 'student' else '回應'}：{item.get('content', '')}"
         for item in (prior_notes or [])[-6:]
