@@ -33,6 +33,12 @@ def test_thought_log_styles_exist() -> None:
     assert ":has(.ct-online)" in APP_CSS
     assert ".ct-quota-fill" in APP_CSS
     assert 'iframe[title$="quota_sync"]' in APP_CSS
+    assert "backdrop-filter: none" in APP_CSS
+    assert "z-index: 1000000" in APP_CSS
+    assert "stHorizontalBlock" in APP_CSS
+    assert ":has(.ct-thoughts)" in APP_CSS
+    assert "align-items: flex-end" in APP_CSS
+    assert "bottom: 5.25rem" in APP_CSS
 
 
 def test_quota_bar_overlays_three_remaining_metrics():

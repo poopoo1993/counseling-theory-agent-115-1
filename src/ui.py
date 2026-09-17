@@ -40,10 +40,14 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
   color: var(--ct-ink);
 }
 
-[data-testid="stHeader"] {
-  background: rgba(244, 241, 235, 0.88);
-  backdrop-filter: blur(10px);
+header[data-testid="stHeader"],
+[data-testid="stHeader"],
+.stAppHeader {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
   border-bottom: 0;
+  pointer-events: none;
 }
 
 [data-testid="stToolbar"] {
@@ -522,7 +526,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   position: fixed;
   top: 0.85rem;
   right: 1.15rem;
-  z-index: 10050;
+  z-index: 1000000;
   display: flex;
   align-items: stretch;
   gap: 0.45rem;
@@ -711,6 +715,25 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   margin-top: 0.95rem;
   padding-top: 0.8rem;
   border-top: 1px solid var(--ct-line);
+}
+
+[data-testid="stHorizontalBlock"]:has(.ct-thoughts) {
+  align-items: flex-end !important;
+  overflow: visible !important;
+}
+
+[data-testid="stMainBlockContainer"]:has(.ct-thoughts),
+.block-container:has(.ct-thoughts) {
+  overflow: visible !important;
+}
+
+[data-testid="stHorizontalBlock"]:has(.ct-thoughts) > div:has(.ct-thoughts),
+[data-testid="stColumn"]:has(.ct-thoughts),
+[data-testid="column"]:has(.ct-thoughts) {
+  position: sticky;
+  bottom: 5.25rem;
+  z-index: 20;
+  align-self: flex-end;
 }
 
 .ct-thoughts .ct-kicker {
